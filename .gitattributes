@@ -1,0 +1,2 @@
+# Databases as builds of each format left them: their bytes are what the tests are about.
+packages/storage-json/test/fixtures/formats/** text eol=lf

@@ -1,0 +1,35 @@
+[
+  {
+    "id": 1,
+    "name": "Ada",
+    "active": true,
+    "joined": "2026-01-05T09:30:00.000Z",
+    "balance": 12.5,
+    "profile": {
+      "tags": [
+        "admin",
+        "ops"
+      ],
+      "theme": null
+    }
+  },
+  {
+    "id": 2,
+    "name": "Bo Østergaard",
+    "active": false,
+    "joined": null,
+    "balance": 0,
+    "profile": null
+  },
+  {
+    "id": 3,
+    "name": "漢字 \"quoted\"",
+    "active": true,
+    "joined": "2026-02-28T23:59:59.999Z",
+    "balance": -3.75,
+    "profile": {
+      "tags": [],
+      "theme": "dark"
+    }
+  }
+]

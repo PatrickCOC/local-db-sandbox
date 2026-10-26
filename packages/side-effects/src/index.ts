@@ -1,0 +1,14 @@
+export { parseMail } from "./mime.ts";
+export type { MailAttachment, MailHeader, ParsedMail } from "./mime.ts";
+export { DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, SmtpCaptureServer, SmtpServerError, isLoopbackHost } from "./smtp-server.ts";
+export type { SmtpMessage, SmtpServerOptions } from "./smtp-server.ts";
+export { DEFAULT_MAX_MESSAGES, MailCapture } from "./mail-capture.ts";
+export type { CapturedMail, MailCaptureOptions } from "./mail-capture.ts";
+export { MailClient, MailControlError, startMailControl } from "./mail-control.ts";
+export type { MailControl, SandboxRuntime } from "./mail-control.ts";
+export { NETWORK_GUARD_MODES, NetworkGuardError, installNetworkHook } from "./network-guard.ts";
+export type { ConnectingSocket, NetworkEvent, NetworkGuardMode, NetworkHookOptions } from "./network-guard.ts";
+export { SideEffectConfigError, parseNetworkConfig, parseSmtpConfig, smtpAddress, smtpEnvironment } from "./config.ts";
+export type { NetworkConfig, SmtpConfig } from "./config.ts";
+export { BACKGROUND, formatSideEffectEvent, formatUnguardedSideEffects, mailCapturedEvent, startSharedMailCapture, startSideEffects } from "./side-effects.ts";
+export type { MailCapturedEvent, SharedCapture, SideEffectEvent, SideEffectStatus, SideEffects, SideEffectsOptions } from "./side-effects.ts";

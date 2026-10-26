@@ -1,0 +1,40 @@
+{
+  "formatVersion": 2,
+  "database": "shop",
+  "persistence": "json",
+  "config": {
+    "server": {
+      "port": 4999
+    },
+    "limits": {
+      "maxFileSizeMb": 2
+    },
+    "defaults": {
+      "delayMs": 0
+    }
+  },
+  "tables": [
+    {
+      "name": "users",
+      "file": "users.json"
+    },
+    {
+      "name": "orders",
+      "file": "orders.json"
+    },
+    {
+      "name": "Order Items",
+      "file": "Order%20Items.json"
+    },
+    {
+      "name": "empty",
+      "file": "empty.json"
+    }
+  ],
+  "extra": {
+    "$notes": "kept as it is",
+    "$owner": {
+      "team": "fixtures"
+    }
+  }
+}

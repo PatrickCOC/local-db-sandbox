@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tgz
+# The record of the process that has a database open (D-042): written beside the database while a sandbox runs,
+# left behind by one that was killed, and never part of the database.
+*.owner.json
+*.owner.lock

@@ -1,0 +1,14 @@
+[
+  {
+    "orderId": 10,
+    "line": 1,
+    "sku": "A-1",
+    "note": "first\nsecond"
+  },
+  {
+    "orderId": 10,
+    "line": 2,
+    "sku": "B/2",
+    "note": ""
+  }
+]

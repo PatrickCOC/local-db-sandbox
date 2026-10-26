@@ -1,0 +1,183 @@
+{
+  "$meta": {
+    "version": 1
+  },
+  "$config": {
+    "server": {
+      "port": 4999
+    },
+    "limits": {
+      "maxFileSizeMb": 2
+    },
+    "defaults": {
+      "delayMs": 0
+    }
+  },
+  "$notes": "kept as it is",
+  "$tableSchema": {
+    "schemaVersion": 1,
+    "tables": [
+      {
+        "name": "users",
+        "columns": [
+          {
+            "column": "id",
+            "property": "id",
+            "type": "integer",
+            "declaredType": "int",
+            "nullable": false,
+            "primaryKey": true,
+            "generated": "increment"
+          },
+          {
+            "column": "display_name",
+            "property": "name",
+            "type": "text",
+            "declaredType": "varchar",
+            "nullable": false,
+            "primaryKey": false
+          },
+          {
+            "column": "active",
+            "property": "active",
+            "type": "boolean",
+            "declaredType": "boolean",
+            "nullable": false,
+            "primaryKey": false,
+            "default": true
+          },
+          {
+            "column": "joined",
+            "property": "joined",
+            "type": "datetime",
+            "declaredType": "timestamptz",
+            "nullable": true,
+            "primaryKey": false
+          },
+          {
+            "column": "balance",
+            "property": "balance",
+            "type": "numeric",
+            "declaredType": "decimal",
+            "nullable": false,
+            "primaryKey": false,
+            "default": 0
+          },
+          {
+            "column": "profile",
+            "property": "profile",
+            "type": "json",
+            "declaredType": "jsonb",
+            "nullable": true,
+            "primaryKey": false
+          }
+        ]
+      },
+      {
+        "name": "orders",
+        "columns": [
+          {
+            "column": "id",
+            "property": "id",
+            "type": "integer",
+            "declaredType": "int",
+            "nullable": false,
+            "primaryKey": true,
+            "generated": "increment"
+          },
+          {
+            "column": "userId",
+            "property": "userId",
+            "type": "integer",
+            "declaredType": "int",
+            "nullable": true,
+            "primaryKey": false,
+            "references": {
+              "table": "users",
+              "column": "id",
+              "onDelete": "SET NULL"
+            }
+          },
+          {
+            "column": "total",
+            "property": "total",
+            "type": "integer",
+            "declaredType": "bigint",
+            "nullable": false,
+            "primaryKey": false,
+            "default": 0
+          }
+        ]
+      }
+    ]
+  },
+  "data": {
+    "users": [
+      {
+        "id": 1,
+        "name": "Ada",
+        "active": true,
+        "joined": "2026-01-05T09:30:00.000Z",
+        "balance": 12.5,
+        "profile": {
+          "tags": [
+            "admin",
+            "ops"
+          ],
+          "theme": null
+        }
+      },
+      {
+        "id": 2,
+        "name": "Bo Østergaard",
+        "active": false,
+        "joined": null,
+        "balance": 0,
+        "profile": null
+      },
+      {
+        "id": 3,
+        "name": "漢字 \"quoted\"",
+        "active": true,
+        "joined": "2026-02-28T23:59:59.999Z",
+        "balance": -3.75,
+        "profile": {
+          "tags": [],
+          "theme": "dark"
+        }
+      }
+    ],
+    "orders": [
+      {
+        "id": 10,
+        "userId": 1,
+        "total": 30
+      },
+      {
+        "id": 11,
+        "userId": 1,
+        "total": 0
+      },
+      {
+        "id": 12,
+        "userId": null,
+        "total": 9007199254740991
+      }
+    ],
+    "Order Items": [
+      {
+        "orderId": 10,
+        "line": 1,
+        "sku": "A-1",
+        "note": "first\nsecond"
+      },
+      {
+        "orderId": 10,
+        "line": 2,
+        "sku": "B/2",
+        "note": ""
+      }
+    ],
+    "empty": []
+  }
+}

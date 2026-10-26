@@ -1,0 +1,60 @@
+{
+  "name": "local-db-sandbox",
+  "version": "0.1.0-beta.1",
+  "description": "Lightweight local JSON database sandbox for frontend and integration development.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PatrickCOC/local-db-sandbox.git"
+  },
+  "homepage": "https://github.com/PatrickCOC/local-db-sandbox#readme",
+  "bugs": {
+    "url": "https://github.com/PatrickCOC/local-db-sandbox/issues"
+  },
+  "type": "module",
+  "bin": {
+    "local-db-sandbox": "dist/packages/cli/src/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/packages/cli/src/index.d.ts",
+      "default": "./dist/packages/cli/src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "examples",
+    "!**/*.owner.json",
+    "!**/*.owner.lock"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "npm run typecheck",
+    "test": "node --test \"packages/**/*.test.ts\"",
+    "start": "node packages/cli/src/bin.ts",
+    "prepare": "npm run build"
+  },
+  "devDependencies": {
+    "@nestjs/common": "^12.1.2",
+    "@nestjs/core": "^12.1.2",
+    "@nestjs/platform-express": "^12.1.2",
+    "@nestjs/typeorm": "^12.0.2",
+    "@supabase/supabase-js": "2.116.0",
+    "@types/node": "^24.0.0",
+    "nodemailer": "9.0.5",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "sql.js": "^1.14.2",
+    "typeorm": "^0.3.31",
+    "typeorm-0.3.17": "npm:typeorm@0.3.17",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "libpg-query": "18.1.5"
+  }
+}

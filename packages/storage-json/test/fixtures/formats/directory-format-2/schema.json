@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "tables": [
+    {
+      "name": "users",
+      "columns": [
+        {
+          "column": "id",
+          "property": "id",
+          "type": "integer",
+          "nullable": false,
+          "primaryKey": true,
+          "generated": "increment"
+        },
+        {
+          "column": "display_name",
+          "property": "name",
+          "type": "text",
+          "nullable": false,
+          "primaryKey": false
+        },
+        {
+          "column": "active",
+          "property": "active",
+          "type": "boolean",
+          "nullable": false,
+          "primaryKey": false,
+          "default": true
+        },
+        {
+          "column": "joined",
+          "property": "joined",
+          "type": "datetime",
+          "nullable": true,
+          "primaryKey": false
+        },
+        {
+          "column": "balance",
+          "property": "balance",
+          "type": "numeric",
+          "nullable": false,
+          "primaryKey": false,
+          "default": 0
+        },
+        {
+          "column": "profile",
+          "property": "profile",
+          "type": "json",
+          "nullable": true,
+          "primaryKey": false
+        }
+      ]
+    },
+    {
+      "name": "orders",
+      "columns": [
+        {
+          "column": "id",
+          "property": "id",
+          "type": "integer",
+          "nullable": false,
+          "primaryKey": true,
+          "generated": "increment"
+        },
+        {
+          "column": "userId",
+          "property": "userId",
+          "type": "integer",
+          "nullable": true,
+          "primaryKey": false,
+          "references": {
+            "table": "users",
+            "column": "id",
+            "onDelete": "SET NULL"
+          }
+        },
+        {
+          "column": "total",
+          "property": "total",
+          "type": "integer",
+          "nullable": false,
+          "primaryKey": false,
+          "default": 0
+        }
+      ]
+    }
+  ]
+}

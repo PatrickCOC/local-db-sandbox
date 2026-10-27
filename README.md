@@ -13,7 +13,7 @@ Everything runs on this machine. Apart from the mock REST API, which has a JSON 
 This is **`0.2.0-beta.1`** of [`local-db-sandbox`](https://www.npmjs.com/package/local-db-sandbox) on npm, installed with the `beta` tag. It is a beta for personal and team development use. New in 0.2.0: `init-pg` (a schema from a running PostgreSQL database), and Studio's Export (tables as a PostgreSQL script), Clear data, and ER Diagram tabs.
 
 - Most commands are marked experimental. Commands, options, and file formats may still change before 1.0; a database of an earlier format is read and is brought to the current one with `local-db-sandbox migrate`.
-- It is tested on Node.js 22 with NestJS 10 and 12, TypeORM 0.3.17 and 0.3.31, and supabase-js 2.
+- Verified for this release: the automated tests run on Node.js 22 with NestJS 12, TypeORM 0.3.31 and 0.3.17 (a NestJS project on each), and supabase-js 2.116; the release smoke test installed the package into a new NestJS 12 / TypeORM 0.3.31 project. NestJS 10 was checked together with TypeORM 0.3.17 for 0.1.0, and is not verified again for this release.
 - Report problems at [GitHub Issues](https://github.com/PatrickCOC/local-db-sandbox/issues).
 
 ## Supported projects

@@ -12,6 +12,7 @@ import { runPlanMigration } from "./plan-migration-command.ts";
 import { runImportTypeorm } from "./import-command.ts";
 import { runInit } from "./init-command.ts";
 import { runInitNest } from "./init-nest-command.ts";
+import { runInitPg } from "./init-pg-command.ts";
 import { runInspect } from "./inspect-command.ts";
 import { runMail } from "./mail-command.ts";
 import { runMigrate } from "./migrate-command.ts";
@@ -25,8 +26,9 @@ const NAME = "local-db-sandbox";
 
 const USAGE = `Usage: ${NAME} <database> [options]
        ${NAME} import-typeorm <path> [options]
-       ${NAME} init <project-or-migrations> [options]
+       ${NAME} init [project-or-migrations] [options]
        ${NAME} init-nest [entry] [options]
+       ${NAME} init-pg <connection-url> [options]
        ${NAME} sql <database> ["<SQL>"] [options]
        ${NAME} convert <database> --out <path> [options]
        ${NAME} inspect <database> [options]
@@ -37,13 +39,14 @@ const USAGE = `Usage: ${NAME} <database> [options]
        ${NAME} plan-migration <before> <after> [options]
        ${NAME} generate-migration <before> <after> --dialect postgres [options]
        ${NAME} simulate <database> <script.sql> [options]
-       ${NAME} studio <database> [options]
+       ${NAME} studio [database] [options]
 
 Serves a JSON database as a local REST API. <database> is a single file
 (sandbox.db.json) or a database directory (sandbox.db).
 "import-typeorm" creates a database file from TypeORM entities; see "${NAME} import-typeorm --help".
 "init" creates a database from a project's PostgreSQL migrations; see "${NAME} init --help".
 "init-nest" sets up a sandbox server for a NestJS + TypeORM project; see "${NAME} init-nest --help".
+"init-pg" creates a database from the schema of a running PostgreSQL database, reading its catalog only; see "${NAME} init-pg --help".
 "sql" opens a SQL console on a database; see "${NAME} sql --help".
 "convert" copies a database into the other kind of storage; see "${NAME} convert --help".
 "inspect" says what format a database has, without changing it; see "${NAME} inspect --help".
@@ -126,6 +129,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
   }
   if (argv[0] === "init-nest") {
     return runInitNest(argv.slice(1), io);
+  }
+  if (argv[0] === "init-pg") {
+    return runInitPg(argv.slice(1), io);
   }
   if (argv[0] === "sql") {
     return runSql(argv.slice(1), io);

@@ -89,6 +89,8 @@ table.definition th { position: static; }
 .result pre { margin: 0 0 4px; white-space: pre-wrap; color: var(--soft); font-size: 12px; }
 .failure { border: 1px solid var(--bad); color: var(--bad); border-radius: 4px; padding: 6px 10px; margin-top: 12px; white-space: pre-wrap; }
 .check { display: inline-flex; align-items: center; gap: 4px; }
+.choices { list-style: none; padding: 0; margin: 4px 0; columns: 2; }
+.stacked-mode { display: flex; margin: 4px 0; }
 #dialog { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow: auto; }
 .panel { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 16px; width: min(640px, 100%); }
 .field { display: grid; grid-template-columns: 170px 1fr; gap: 4px 12px; padding: 6px 0; border-bottom: 1px solid var(--line); }
@@ -104,6 +106,24 @@ body.disconnected main { opacity: 0.55; }
 .stacked { display: block; margin-top: 8px; color: var(--soft); }
 .stacked textarea { margin-top: 2px; color: var(--ink); }
 .result pre.body { color: var(--ink); font-size: 13px; max-height: 60vh; overflow: auto; border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; }
+#er-search { min-width: 220px; }
+#er-results { list-style: none; margin: 4px 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+#er-results button { border-color: var(--line); }
+#er-canvas { display: block; width: 100%; height: 68vh; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); touch-action: none; cursor: grab; user-select: none; }
+#er-canvas.panning { cursor: grabbing; }
+.er-table { cursor: move; }
+.er-table rect.box { fill: var(--paper); stroke: var(--line); stroke-width: 1.2; }
+.er-table rect.head { fill: var(--shade); }
+.er-table line.rule { stroke: var(--line); }
+.er-table text { font: 12px ui-monospace, Consolas, monospace; fill: var(--ink); white-space: pre; }
+.er-table text.title { font-size: 13px; font-weight: 700; }
+.er-table text.soft { fill: var(--soft); }
+.er-table text.key { fill: var(--mark); font-size: 10px; font-weight: 700; }
+.er-table.chosen rect.box { stroke: var(--mark); stroke-width: 2.5; }
+.er-table.found rect.box { stroke: var(--warn); stroke-width: 3.5; }
+.er-edge { fill: none; stroke: var(--soft); stroke-width: 1.3; opacity: 0.7; }
+.er-edge.related { stroke: var(--mark); stroke-width: 2.4; opacity: 1; }
+.er-arrow { fill: var(--soft); }
 `;
 
 const MARKUP = String.raw`
@@ -119,10 +139,13 @@ const MARKUP = String.raw`
 <main>
 <nav><h2>Tables</h2><ul id="tables"></ul></nav>
 <section>
-<div class="tabs"><button type="button" id="tab-table" class="tab current">Rows</button><button type="button" id="tab-sql" class="tab">SQL</button><button type="button" id="tab-api" class="tab">API</button></div>
+<div class="tabs"><button type="button" id="tab-table" class="tab current">Rows</button><button type="button" id="tab-sql" class="tab">SQL</button><button type="button" id="tab-api" class="tab">API</button><button type="button" id="tab-export" class="tab">Export</button><button type="button" id="tab-clear" class="tab">Clear data</button><button type="button" id="tab-er" class="tab">ER Diagram</button></div>
 <div id="view-table"></div>
 <div id="view-sql" hidden></div>
 <div id="view-api" hidden></div>
+<div id="view-export" hidden></div>
+<div id="view-clear" hidden></div>
+<div id="view-er" hidden></div>
 </section>
 </main>
 </div>
@@ -159,6 +182,14 @@ const SCRIPT = String.raw`
     dismiss: null,
     /** Whether the API Studio was started with was put in the API tab's field. */
     apiGiven: false,
+    /** The tables chosen in the Export tab, by name. */
+    exportTables: new Set(),
+    /** The address of the last export's file, while it is offered again. */
+    exportUrl: null,
+    /** The tables chosen in the Clear data tab, by name. */
+    clearTables: new Set(),
+    /** The ER Diagram tab: the diagram as the server laid it out, where each table stands now, and how it is looked at. */
+    er: { diagram: null, signature: null, stale: true, loading: false, fitLater: false, at: new Map(), view: { x: 0, y: 0, k: 1 }, boxes: new Map(), lines: [], linesOf: new Map(), found: null, chosen: null },
   };
 
   // --- the page's own tools ---------------------------------------------------------------------------
@@ -231,6 +262,9 @@ const SCRIPT = String.raw`
     const failure = new Error(answer && answer.error && answer.error.message ? answer.error.message : "Local DB Studio answered " + response.status + ".");
     failure.code = answer && answer.error && answer.error.code ? answer.error.code : "INTERNAL";
     failure.status = response.status;
+    if (answer && answer.error && Array.isArray(answer.error.refusals)) {
+      failure.refusals = answer.error.refusals;
+    }
     throw failure;
   };
 
@@ -379,6 +413,9 @@ const SCRIPT = String.raw`
         allow.checked = false;
       }
     }
+    if (byId("clear-run")) {
+      updateClear();
+    }
   };
 
   /** Reads everything that is shown again: the tables, and the page of the table that is open. */
@@ -396,6 +433,9 @@ const SCRIPT = String.raw`
       state.filters = [];
     }
     renderTables();
+    renderExportTables();
+    renderClearTables();
+    schemaRead();
     await loadTable();
   };
 
@@ -997,6 +1037,690 @@ const SCRIPT = String.raw`
     );
   };
 
+  // --- the Export tab ---------------------------------------------------------------------------------
+
+  const EXPORT_MODES = [
+    ["schema", "Schema only", "CREATE TABLE, keys, foreign keys, unique constraints, defaults, indexes, enumerated types"],
+    ["data", "Data only", "INSERT statements for the rows, for tables that are there already"],
+    ["schema-and-data", "Schema + data", "the definitions, the rows, and the foreign keys after them"],
+  ];
+
+  const exportMode = () => {
+    const chosen = document.querySelector('input[name="export-mode"]:checked');
+    return chosen ? chosen.value : "schema";
+  };
+
+  /** What the chosen tables and mode are, in words, and whether an export can be asked for. */
+  const updateExport = () => {
+    const mode = exportMode();
+    const withData = mode !== "schema";
+    const count = state.exportTables.size;
+    byId("export-confirm-line").hidden = !withData;
+    const label = EXPORT_MODES.find((entry) => entry[0] === mode)[1];
+    byId("export-summary").textContent = count + " table" + (count === 1 ? "" : "s") + " · " + label;
+    byId("export-run").disabled = count === 0 || (withData && !byId("export-confirm").checked) || !connected();
+  };
+
+  /** The tables to choose from: those the database has now. A choice is kept for the tables that are still there. */
+  const renderExportTables = () => {
+    const list = byId("export-tables");
+    if (!list) {
+      return;
+    }
+    clear(list);
+    const tables = state.schema ? state.schema.tables : [];
+    for (const name of [...state.exportTables]) {
+      if (!tables.some((table) => table.name === name)) {
+        state.exportTables.delete(name);
+      }
+    }
+    if (tables.length === 0) {
+      list.append(node("li", { class: "empty", text: "The database has no tables." }));
+    }
+    tables.forEach((table, index) => {
+      const box = node("input", { type: "checkbox", id: "export-table-" + index, "data-table": table.name, checked: state.exportTables.has(table.name) });
+      box.addEventListener("change", () => {
+        if (box.checked) {
+          state.exportTables.add(table.name);
+        } else {
+          state.exportTables.delete(table.name);
+        }
+        updateExport();
+      });
+      list.append(node("li", {}, [node("label", { class: "check" }, [box, table.name + " (" + table.rows + " row" + (table.rows === 1 ? "" : "s") + ")"])]));
+    });
+    updateExport();
+  };
+
+  const chooseAll = (all) => () => {
+    state.exportTables = new Set(all && state.schema ? state.schema.tables.map((table) => table.name) : []);
+    renderExportTables();
+  };
+
+  /** Offers the script as a file: made in the page, from what the server gave, and sent nowhere. */
+  const offerFile = (result) => {
+    if (state.exportUrl) {
+      URL.revokeObjectURL(state.exportUrl);
+    }
+    state.exportUrl = URL.createObjectURL(new Blob([result.sql], { type: "application/sql;charset=utf-8" }));
+    const link = node("a", { id: "export-download", href: state.exportUrl, download: result.fileName, text: "Download " + result.fileName + " again" });
+    link.click();
+    return link;
+  };
+
+  const runExport = async () => {
+    const out = byId("export-result");
+    clear(out);
+    const mode = exportMode();
+    const tables = state.schema ? state.schema.tables.map((table) => table.name).filter((name) => state.exportTables.has(name)) : [];
+    out.append(node("p", { class: "empty", text: "Exporting..." }));
+    byId("export-run").disabled = true;
+    try {
+      const result = (await call("POST", "/api/export", { request: { tables: tables, mode: mode, confirmData: mode !== "schema" && byId("export-confirm").checked } })).result;
+      clear(out);
+      const link = offerFile(result);
+      const label = EXPORT_MODES.find((entry) => entry[0] === result.mode)[1];
+      out.append(
+        node("div", { class: "result", id: "export-done" }, [
+          node("h3", { text: "Exported " + result.tables.length + " table" + (result.tables.length === 1 ? "" : "s") + " · " + label + (result.mode === "schema" ? "" : " · " + result.rows + " row" + (result.rows === 1 ? "" : "s")) }),
+          node("p", { text: result.statements + " statements, " + result.bytes + " bytes, as one transaction. Load it with psql -v ON_ERROR_STOP=1 -f " + result.fileName + "." }),
+          result.warnings.length > 0 ? node("div", { class: "failure", id: "export-warnings" }, [node("strong", { text: "Warnings (also in the file)" }), node("ul", {}, result.warnings.map((warning) => node("li", { text: warning })))]) : null,
+          node("p", {}, [link]),
+        ]),
+      );
+    } catch (failure) {
+      clear(out);
+      out.append(node("div", { class: "failure", id: "export-failure" }, [node("strong", { text: failure.code || "Error" }), node("p", { text: failure.message + " No file was made." })]));
+      if (failure.refusals) {
+        out.lastChild.append(node("ul", {}, failure.refusals.map((refusal) => node("li", { text: (refusal.table ? refusal.table + (refusal.column ? "." + refusal.column : "") + ": " : "") + refusal.message }))));
+      }
+      if (failure.code === "STUDIO_GONE") {
+        poll();
+      }
+    } finally {
+      updateExport();
+    }
+  };
+
+  const buildExport = () => {
+    const modes = EXPORT_MODES.map((entry, index) => {
+      const radio = node("input", { type: "radio", name: "export-mode", id: "export-mode-" + entry[0], value: entry[0], checked: index === 0 });
+      radio.addEventListener("change", updateExport);
+      return node("label", { class: "check stacked-mode" }, [radio, node("strong", { text: entry[1] }), node("span", { class: "empty", text: " — " + entry[2] })]);
+    });
+    const confirm = node("input", { type: "checkbox", id: "export-confirm" });
+    confirm.addEventListener("change", updateExport);
+    byId("view-export").append(
+      node("p", { class: "empty", text: "Writes the chosen tables as an SQL script for PostgreSQL, to load into an empty database with psql. It reads the sandbox and changes nothing; it connects to no database." }),
+      node("h3", { text: "Tables" }),
+      node("div", { class: "bar" }, [press("All", chooseAll(true), { id: "export-all" }), press("None", chooseAll(false), { id: "export-none" })]),
+      node("ul", { id: "export-tables", class: "choices" }),
+      node("h3", { text: "What to export" }),
+      node("div", { id: "export-modes" }, modes),
+      node("p", { id: "export-confirm-line", hidden: true }, [
+        node("label", { class: "check" }, [confirm, "The file will hold the rows of these tables, which may be data you entered: I want them in it."]),
+      ]),
+      node("div", { class: "bar" }, [press("Export .sql", runExport, { class: "primary", id: "export-run" }), node("span", { id: "export-summary", class: "empty" })]),
+      node("div", { id: "export-result" }),
+    );
+    updateExport();
+  };
+
+  // --- the Clear data tab -----------------------------------------------------------------------------
+
+  /** The tables chosen to clear, as the page last read them, with their rows. */
+  const clearChoice = () => (state.schema ? state.schema.tables.filter((table) => state.clearTables.has(table.name)) : []);
+
+  /** What the chosen tables hold, and whether the rows can be cleared: tables chosen, the loss acknowledged, the database writable. */
+  const updateClear = () => {
+    const chosen = clearChoice();
+    const rows = chosen.reduce((sum, table) => sum + table.rows, 0);
+    byId("clear-summary").textContent = chosen.length + " table" + (chosen.length === 1 ? "" : "s") + " · " + rows + " row" + (rows === 1 ? "" : "s") + " to delete";
+    const why = byId("clear-locked");
+    why.hidden = writable();
+    why.textContent = !connected() ? "Not connected: nothing can be cleared now." : state.status && state.status.info && state.status.info.readOnly ? "Read-only: " + state.status.info.readOnly : "";
+    byId("clear-run").disabled = chosen.length === 0 || !byId("clear-understood").checked || !writable();
+  };
+
+  const renderClearTables = () => {
+    const list = byId("clear-tables");
+    if (!list) {
+      return;
+    }
+    clear(list);
+    const tables = state.schema ? state.schema.tables : [];
+    for (const name of [...state.clearTables]) {
+      if (!tables.some((table) => table.name === name)) {
+        state.clearTables.delete(name);
+      }
+    }
+    if (tables.length === 0) {
+      list.append(node("li", { class: "empty", text: "The database has no tables." }));
+    }
+    tables.forEach((table, index) => {
+      const box = node("input", { type: "checkbox", id: "clear-table-" + index, "data-table": table.name, checked: state.clearTables.has(table.name) });
+      box.addEventListener("change", () => {
+        if (box.checked) {
+          state.clearTables.add(table.name);
+        } else {
+          state.clearTables.delete(table.name);
+        }
+        updateClear();
+      });
+      list.append(node("li", {}, [node("label", { class: "check" }, [box, table.name + " (" + table.rows + " row" + (table.rows === 1 ? "" : "s") + ")"])]));
+    });
+    updateClear();
+  };
+
+  const chooseToClear = (all) => () => {
+    state.clearTables = new Set(all && state.schema ? state.schema.tables.map((table) => table.name) : []);
+    renderClearTables();
+  };
+
+  const runClear = async () => {
+    const chosen = clearChoice();
+    const rows = chosen.reduce((sum, table) => sum + table.rows, 0);
+    // The rows are those of the runtime the page shows now: a request made for it is carried out by no other.
+    const madeFor = state.owner;
+    const lines = [
+      "Every row of " + (chosen.length === 1 ? "this table" : "these " + chosen.length + " tables") + " is deleted, in one transaction: " + chosen.map((table) => table.name + " (" + table.rows + ")").join(", ") + ".",
+      "The tables stay as they are: columns, keys, constraints, indexes. Numbering goes on after the last number given: an id is not given again while the database stays open.",
+      "This cannot be undone. To keep the rows, export them first (Export, with data), or copy the database directory while nothing has it open.",
+    ];
+    if (!(await confirmThat("Delete " + rows + " row" + (rows === 1 ? "" : "s") + " from " + chosen.length + " table" + (chosen.length === 1 ? "" : "s") + "?", lines, "Delete the rows"))) {
+      return;
+    }
+    const out = byId("clear-result");
+    clear(out);
+    byId("clear-run").disabled = true;
+    try {
+      const done = await change("clear", { tables: chosen.map((table) => table.name) }, madeFor);
+      out.append(node("p", { id: "clear-done", text: "Deleted " + done.rows + " row" + (done.rows === 1 ? "" : "s") + " from " + done.tables.length + " table" + (done.tables.length === 1 ? "" : "s") + ": " + done.tables.map((entry) => entry.table + " (" + entry.rows + ")").join(", ") + "." }));
+      say("info", "Deleted " + done.rows + " row" + (done.rows === 1 ? "" : "s") + ".");
+      byId("clear-understood").checked = false;
+      await refresh();
+    } catch (failure) {
+      out.append(node("div", { class: "failure", id: "clear-failure" }, [node("strong", { text: failure.code || "Error" }), node("p", { text: failure.message })]));
+      if (failure.code === "OWNER_CHANGED" || failure.code === "OWNER_UNREACHABLE" || failure.code === "OUTCOME_UNKNOWN" || failure.code === "STUDIO_GONE") {
+        poll();
+      }
+    } finally {
+      updateClear();
+    }
+  };
+
+  const buildClear = () => {
+    const understood = node("input", { type: "checkbox", id: "clear-understood" });
+    understood.addEventListener("change", updateClear);
+    byId("view-clear").append(
+      node("p", { class: "empty", text: "Deletes every row of the tables you choose, in one transaction. The tables, their columns, keys, constraints, and indexes stay. A table whose rows another table that is not chosen refers to is not cleared: choose that table too." }),
+      node("h3", { text: "Tables" }),
+      node("div", { class: "bar" }, [press("All", chooseToClear(true), { id: "clear-all" }), press("None", chooseToClear(false), { id: "clear-none" })]),
+      node("ul", { id: "clear-tables", class: "choices" }),
+      node("p", {}, [node("label", { class: "check" }, [understood, "I understand that the rows deleted cannot be restored."])]),
+      node("div", { class: "bar" }, [press("Clear data…", runClear, { class: "danger", id: "clear-run" }), node("span", { id: "clear-summary", class: "empty" })]),
+      node("p", { id: "clear-locked", class: "failure", hidden: true }),
+      node("div", { id: "clear-result" }),
+    );
+    updateClear();
+  };
+
+  // --- the ER diagram ---------------------------------------------------------------------------------
+
+  const SVG = "http://www.w3.org/2000/svg";
+  /** An element of the drawing. Names of the database only ever get here as text. */
+  const shape = (tag, attributes, children) => {
+    const made = document.createElementNS(SVG, tag);
+    for (const [name, value] of Object.entries(attributes || {})) {
+      if (name === "text") {
+        made.textContent = value;
+      } else {
+        made.setAttribute(name, String(value));
+      }
+    }
+    for (const child of children || []) {
+      if (child) {
+        made.append(child);
+      }
+    }
+    return made;
+  };
+  const tip = (text) => shape("title", { text: text });
+  const plural = (count, one, many) => count + " " + (count === 1 ? one : many);
+
+  /** What the diagram was made from: the tables and their columns, without their numbers of rows. */
+  const erSignature = () => (state.schema ? JSON.stringify(state.schema.tables.map((table) => [table.name, table.columns])) : "");
+
+  /** The schema was read again: the diagram is made again when it shows, if what it is made from changed. */
+  const schemaRead = () => {
+    if (state.er.signature !== erSignature()) {
+      state.er.stale = true;
+      if (!byId("view-er").hidden) {
+        loadEr();
+      }
+    }
+  };
+
+  const erNote = (kind, text) => {
+    const note = byId("er-note");
+    clear(note);
+    note.className = kind === "error" ? "failure" : "empty";
+    note.hidden = text === "";
+    note.textContent = text;
+  };
+
+  const loadEr = async () => {
+    if (!state.schema || state.er.loading) {
+      return;
+    }
+    state.er.loading = true;
+    state.er.stale = false;
+    const signature = erSignature();
+    byId("er-summary").textContent = "Laying out the tables…";
+    try {
+      let diagram;
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          diagram = (await call("POST", "/api/diagram", { request: { tables: state.schema.tables.map((table) => table.name) } })).result;
+          break;
+        } catch (failure) {
+          if (failure.code !== "BUSY" || attempt >= 3) {
+            throw failure;
+          }
+          await wait(250);
+        }
+      }
+      state.er.signature = signature;
+      state.er.diagram = diagram;
+      state.er.found = null;
+      state.er.chosen = null;
+      arrangeEr();
+      erNote("info", "");
+      const unresolved = diagram.unresolved.length;
+      if (diagram.tables.length === 0) {
+        erNote("info", "The database has no tables.");
+      } else if (unresolved > 0) {
+        erNote("info", plural(unresolved, "foreign key refers", "foreign keys refer") + " to a table that is not in the database, and " + (unresolved === 1 ? "is" : "are") + " not drawn: " + diagram.unresolved.map((key) => key.from.table + " (" + key.from.columns.join(", ") + ") → " + key.to.table).join("; ") + ".");
+      }
+    } catch (failure) {
+      state.er.diagram = null;
+      state.er.signature = null;
+      drawEr();
+      erNote("error", (failure.code ? failure.code + ": " : "") + failure.message);
+      if (failure.code === "OWNER_CHANGED" || failure.code === "OWNER_UNREACHABLE" || failure.code === "STUDIO_GONE") {
+        poll();
+      }
+    } finally {
+      state.er.loading = false;
+      renderErSummary();
+      searchEr();
+    }
+    if (state.er.stale) {
+      loadEr();
+    }
+  };
+
+  const renderErSummary = () => {
+    const diagram = state.er.diagram;
+    byId("er-summary").textContent = diagram ? plural(diagram.tables.length, "table", "tables") + " · " + plural(diagram.foreignKeys.length + diagram.unresolved.length, "foreign key", "foreign keys") : "";
+  };
+
+  /** Every table where the layout put it, and all of them in view. */
+  const arrangeEr = () => {
+    state.er.at = new Map();
+    for (const table of state.er.diagram ? state.er.diagram.tables : []) {
+      state.er.at.set(table.name, { x: table.x, y: table.y });
+    }
+    drawEr();
+    fitEr();
+  };
+
+  /** The rows of a column's line, as the page shows them: where a line to it starts or ends. */
+  const anchor = (table, column, right) => {
+    const at = state.er.at.get(table.name);
+    const g = state.er.diagram.geometry;
+    const index = table.columns.findIndex((each) => each.name === column);
+    return { x: at.x + (right ? table.width : 0), y: at.y + (index < 0 ? g.header / 2 : g.header + index * g.row + g.row / 2) };
+  };
+
+  /** The line of one pair of columns of a foreign key, from the column that refers to the one referred to. */
+  const linePath = (line) => {
+    const from = line.from;
+    const to = line.to;
+    const a = state.er.at.get(from.name);
+    const b = state.er.at.get(to.name);
+    if (line.key.self) {
+      const start = anchor(from, line.fromColumn, true);
+      const end = anchor(to, line.toColumn, true);
+      const out = 28 + 10 * line.pair;
+      return "M" + start.x + " " + start.y + " C" + (start.x + out) + " " + start.y + " " + (end.x + out) + " " + end.y + " " + (end.x + 6) + " " + end.y;
+    }
+    let start;
+    let end;
+    let bend;
+    if (b.x >= a.x + from.width) {
+      start = anchor(from, line.fromColumn, true);
+      end = anchor(to, line.toColumn, false);
+      bend = Math.max(40, (end.x - start.x) / 2);
+      return "M" + start.x + " " + start.y + " C" + (start.x + bend) + " " + start.y + " " + (end.x - bend) + " " + end.y + " " + (end.x - 6) + " " + end.y;
+    }
+    if (b.x + to.width <= a.x) {
+      start = anchor(from, line.fromColumn, false);
+      end = anchor(to, line.toColumn, true);
+      bend = Math.max(40, (start.x - end.x) / 2);
+      return "M" + start.x + " " + start.y + " C" + (start.x - bend) + " " + start.y + " " + (end.x + bend) + " " + end.y + " " + (end.x + 6) + " " + end.y;
+    }
+    // One above the other: out of the right sides, and round.
+    start = anchor(from, line.fromColumn, true);
+    end = anchor(to, line.toColumn, true);
+    const edge = Math.max(start.x, end.x) + 40 + 10 * line.pair;
+    return "M" + start.x + " " + start.y + " C" + edge + " " + start.y + " " + edge + " " + end.y + " " + (end.x + 6) + " " + end.y;
+  };
+
+  const placeTable = (name) => {
+    const at = state.er.at.get(name);
+    state.er.boxes.get(name).setAttribute("transform", "translate(" + at.x + " " + at.y + ")");
+    for (const line of state.er.linesOf.get(name) || []) {
+      line.path.setAttribute("d", linePath(line));
+    }
+  };
+
+  const markEr = () => {
+    for (const [name, box] of state.er.boxes) {
+      box.classList.toggle("found", name === state.er.found);
+      box.classList.toggle("chosen", name === state.er.chosen);
+    }
+    for (const line of state.er.lines) {
+      line.path.classList.toggle("related", state.er.chosen !== null && (line.from.name === state.er.chosen || line.to.name === state.er.chosen));
+    }
+  };
+
+  const drawEr = () => {
+    const edges = byId("er-edges");
+    const boxes = byId("er-boxes");
+    clear(edges);
+    clear(boxes);
+    state.er.boxes = new Map();
+    state.er.lines = [];
+    state.er.linesOf = new Map();
+    const diagram = state.er.diagram;
+    if (!diagram) {
+      return;
+    }
+    const g = diagram.geometry;
+    const tables = new Map(diagram.tables.map((table) => [table.name, table]));
+    for (const table of diagram.tables) {
+      const parts = [
+        tip(table.name + (table.primaryKey.length > 0 ? "\nPrimary key: " + table.primaryKey.join(", ") : "\nNo primary key")),
+        shape("rect", { class: "box", width: table.width, height: table.height, rx: 4 }),
+        shape("rect", { class: "head", width: table.width, height: g.header, rx: 4 }),
+        shape("line", { class: "rule", x1: 0, x2: table.width, y1: g.header, y2: g.header }),
+        shape("text", { class: "title", x: g.padding, y: 19, text: table.label || table.name }),
+      ];
+      if (table.columns.length === 0) {
+        parts.push(shape("text", { class: "soft", x: g.padding, y: g.header + 14, text: "(no columns)" }));
+      }
+      table.columns.forEach((column, index) => {
+        const y = g.header + index * g.row + 14;
+        const keys = (column.primaryKey ? "PK" : "") + (column.primaryKey && column.foreignKey ? " " : "") + (column.foreignKey ? "FK" : "");
+        const line = shape("g", { class: "column", "data-column": column.name }, [
+          tip(column.name + ": " + column.type + (column.nullable ? ", NULL" : ", NOT NULL") + (column.primaryKey ? ", primary key" : "") + (column.foreignKey ? ", foreign key" : "")),
+          keys ? shape("text", { class: "key", x: table.slots[0], y: y, text: keys }) : null,
+          shape("text", { class: "name", x: table.slots[1], y: y, text: column.label || column.name }),
+          shape("text", { class: "soft type", x: table.slots[2], y: y, text: column.typeLabel || column.type }),
+          shape("text", { class: "soft nulls", x: table.slots[3], y: y, text: column.nullable ? "null" : "not null" }),
+        ]);
+        parts.push(line);
+      });
+      const box = shape("g", { class: "er-table", "data-table": table.name }, parts);
+      box.addEventListener("pointerdown", (event) => dragTable(event, table.name));
+      state.er.boxes.set(table.name, box);
+      boxes.append(box);
+    }
+    for (const key of diagram.foreignKeys) {
+      const from = tables.get(key.from.table);
+      const to = tables.get(key.to.table);
+      const says = (key.name ? key.name + ": " : "") + key.from.table + " (" + key.from.columns.join(", ") + ") → " + key.to.table + " (" + key.to.columns.join(", ") + ")" + (key.onDelete ? "\nON DELETE " + key.onDelete : "") + (key.onUpdate ? "\nON UPDATE " + key.onUpdate : "");
+      key.from.columns.forEach((column, pair) => {
+        const path = shape("path", { class: "er-edge", "data-fk": key.id, "marker-end": "url(#er-arrow)" }, [tip(says)]);
+        const line = { key: key, from: from, to: to, fromColumn: column, toColumn: key.to.columns[pair], pair: pair, path: path };
+        state.er.lines.push(line);
+        for (const name of new Set([from.name, to.name])) {
+          state.er.linesOf.set(name, (state.er.linesOf.get(name) || []).concat([line]));
+        }
+        edges.append(path);
+      });
+    }
+    for (const table of diagram.tables) {
+      placeTable(table.name);
+    }
+    // Text that is wider than its place (a font the page does not have, wide characters) is drawn narrower to fit.
+    for (const table of diagram.tables) {
+      const box = state.er.boxes.get(table.name);
+      const room = [table.slots[2] - table.slots[1] - g.gap / 2, table.slots[3] - table.slots[2] - g.gap / 2];
+      box.querySelectorAll("text.name, text.type").forEach((text) => {
+        const space = text.classList.contains("name") ? room[0] : room[1];
+        if (text.getComputedTextLength() > space) {
+          text.setAttribute("textLength", String(space));
+          text.setAttribute("lengthAdjust", "spacingAndGlyphs");
+        }
+      });
+      const title = box.querySelector("text.title");
+      if (title.getComputedTextLength() > table.width - 2 * g.padding) {
+        title.setAttribute("textLength", String(table.width - 2 * g.padding));
+        title.setAttribute("lengthAdjust", "spacingAndGlyphs");
+      }
+    }
+    markEr();
+  };
+
+  const ER_MIN_ZOOM = 0.02;
+  const ER_MAX_ZOOM = 4;
+
+  // Where the drawing is looked at from: moved by x and y, and made k times as large.
+  const viewEr = () => {
+    const view = state.er.view;
+    byId("er-viewport").setAttribute("transform", "translate(" + view.x + " " + view.y + ") scale(" + view.k + ")");
+    byId("er-zoom").textContent = Math.round(view.k * 100) + "%";
+  };
+
+  const canvasSize = () => {
+    const box = byId("er-canvas").getBoundingClientRect();
+    return { width: box.width, height: box.height, left: box.left, top: box.top };
+  };
+
+  /** Everything in view. While the tab is not shown, when it is shown next. */
+  const fitEr = () => {
+    const size = canvasSize();
+    if (size.width === 0 || size.height === 0) {
+      state.er.fitLater = true;
+      return;
+    }
+    state.er.fitLater = false;
+    const diagram = state.er.diagram;
+    if (!diagram || diagram.tables.length === 0) {
+      state.er.view = { x: 0, y: 0, k: 1 };
+      viewEr();
+      return;
+    }
+    let left = Infinity;
+    let top = Infinity;
+    let right = -Infinity;
+    let bottom = -Infinity;
+    for (const table of diagram.tables) {
+      const at = state.er.at.get(table.name);
+      left = Math.min(left, at.x);
+      top = Math.min(top, at.y);
+      right = Math.max(right, at.x + table.width + 60);
+      bottom = Math.max(bottom, at.y + table.height);
+    }
+    const margin = 24;
+    const k = Math.max(ER_MIN_ZOOM, Math.min(1.25, (size.width - 2 * margin) / (right - left), (size.height - 2 * margin) / (bottom - top)));
+    state.er.view = { k: k, x: (size.width - (right - left) * k) / 2 - left * k, y: (size.height - (bottom - top) * k) / 2 - top * k };
+    viewEr();
+  };
+
+  /** Zooms by a factor, keeping the point at (px, py) of the canvas where it is. */
+  const zoomEr = (factor, px, py) => {
+    const view = state.er.view;
+    const size = canvasSize();
+    const x = px === undefined ? size.width / 2 : px;
+    const y = py === undefined ? size.height / 2 : py;
+    const k = Math.min(ER_MAX_ZOOM, Math.max(ER_MIN_ZOOM, view.k * factor));
+    state.er.view = { k: k, x: x - ((x - view.x) * k) / view.k, y: y - ((y - view.y) * k) / view.k };
+    viewEr();
+  };
+
+  /** A table in the middle of the view, large enough to read, and shown as the one found. */
+  const focusEr = (name) => {
+    const table = state.er.diagram ? state.er.diagram.tables.find((each) => each.name === name) : undefined;
+    if (!table) {
+      return;
+    }
+    const size = canvasSize();
+    const at = state.er.at.get(name);
+    const k = Math.min(ER_MAX_ZOOM, Math.max(state.er.view.k, 1));
+    state.er.view = { k: k, x: size.width / 2 - (at.x + table.width / 2) * k, y: size.height / 2 - (at.y + table.height / 2) * k };
+    state.er.found = name;
+    state.er.chosen = name;
+    // In front of the others.
+    byId("er-boxes").append(state.er.boxes.get(name));
+    viewEr();
+    markEr();
+  };
+
+  const dragTable = (event, name) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.stopPropagation();
+    const box = state.er.boxes.get(name);
+    const start = { x: event.clientX, y: event.clientY };
+    const from = Object.assign({}, state.er.at.get(name));
+    let moved = false;
+    box.setPointerCapture(event.pointerId);
+    byId("er-boxes").append(box);
+    const move = (next) => {
+      const dx = (next.clientX - start.x) / state.er.view.k;
+      const dy = (next.clientY - start.y) / state.er.view.k;
+      if (!moved && Math.abs(next.clientX - start.x) + Math.abs(next.clientY - start.y) < 4) {
+        return;
+      }
+      moved = true;
+      // Only where it stands on this page: nothing of it is kept, and the schema is not changed.
+      state.er.at.set(name, { x: Math.round(from.x + dx), y: Math.round(from.y + dy) });
+      placeTable(name);
+    };
+    const done = () => {
+      box.removeEventListener("pointermove", move);
+      box.removeEventListener("pointerup", done);
+      box.removeEventListener("pointercancel", done);
+      if (!moved) {
+        state.er.chosen = state.er.chosen === name ? null : name;
+        markEr();
+      }
+    };
+    box.addEventListener("pointermove", move);
+    box.addEventListener("pointerup", done);
+    box.addEventListener("pointercancel", done);
+  };
+
+  const panEr = (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    const canvas = byId("er-canvas");
+    const start = { x: event.clientX, y: event.clientY, view: Object.assign({}, state.er.view) };
+    canvas.setPointerCapture(event.pointerId);
+    canvas.classList.add("panning");
+    const move = (next) => {
+      state.er.view = { k: start.view.k, x: start.view.x + next.clientX - start.x, y: start.view.y + next.clientY - start.y };
+      viewEr();
+    };
+    const done = () => {
+      canvas.classList.remove("panning");
+      canvas.removeEventListener("pointermove", move);
+      canvas.removeEventListener("pointerup", done);
+      canvas.removeEventListener("pointercancel", done);
+    };
+    canvas.addEventListener("pointermove", move);
+    canvas.addEventListener("pointerup", done);
+    canvas.addEventListener("pointercancel", done);
+  };
+
+  const ER_RESULTS = 30;
+
+  const searchEr = () => {
+    const list = byId("er-results");
+    clear(list);
+    const asked = byId("er-search").value.trim().toLowerCase();
+    if (asked === "" || !state.er.diagram) {
+      return;
+    }
+    const found = state.er.diagram.tables.filter((table) => table.name.toLowerCase().includes(asked));
+    if (found.length === 0) {
+      list.append(node("li", { class: "empty", text: "No table is called that." }));
+    }
+    for (const table of found.slice(0, ER_RESULTS)) {
+      list.append(node("li", {}, [press(table.name, () => focusEr(table.name), { class: "quiet", "data-table": table.name })]));
+    }
+    if (found.length > ER_RESULTS) {
+      list.append(node("li", { class: "empty", text: "and " + (found.length - ER_RESULTS) + " more: type more of the name." }));
+    }
+  };
+
+  const buildEr = () => {
+    const search = node("input", { type: "search", id: "er-search", placeholder: "Find a table", "aria-label": "Find a table", autocomplete: "off" });
+    search.addEventListener("input", searchEr);
+    search.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        const first = byId("er-results").querySelector("button");
+        if (first) {
+          first.click();
+        }
+      }
+    });
+    const canvas = shape("svg", { id: "er-canvas", role: "img", "aria-label": "ER diagram of the tables and their foreign keys" }, [
+      shape("defs", {}, [shape("marker", { id: "er-arrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" }, [shape("path", { class: "er-arrow", d: "M0 0 L10 5 L0 10 z" })])]),
+      shape("g", { id: "er-viewport" }, [shape("g", { id: "er-edges" }), shape("g", { id: "er-boxes" })]),
+    ]);
+    canvas.addEventListener("pointerdown", panEr);
+    canvas.addEventListener(
+      "wheel",
+      (event) => {
+        event.preventDefault();
+        const size = canvasSize();
+        zoomEr(Math.exp(-event.deltaY * 0.0015), event.clientX - size.left, event.clientY - size.top);
+      },
+      { passive: false },
+    );
+    byId("view-er").append(
+      node("div", { class: "bar" }, [
+        search,
+        press("Zoom in", () => zoomEr(1.25), { id: "er-zoom-in", title: "Zoom in (or the mouse wheel)" }),
+        press("Zoom out", () => zoomEr(0.8), { id: "er-zoom-out", title: "Zoom out (or the mouse wheel)" }),
+        node("span", { id: "er-zoom", class: "empty", text: "100%" }),
+        press("Fit to view", fitEr, { id: "er-fit" }),
+        press("Auto arrange", arrangeEr, { id: "er-arrange", title: "Every table back where the layout puts it. Moved tables are not kept." }),
+        node("span", { class: "space" }),
+        node("span", { id: "er-summary", class: "empty" }),
+      ]),
+      node("ul", { id: "er-results" }),
+      node("p", { id: "er-note", class: "empty", hidden: true }),
+      canvas,
+      node("p", { class: "empty", text: "Drag the background to pan, the wheel to zoom, a table to move it; click a table to show its foreign keys. What is moved is not kept, and the schema is not changed. The diagram is made of the tables' definitions: no row is read." }),
+    );
+    viewEr();
+  };
+
+  const showEr = () => {
+    if (state.er.stale || !state.er.diagram) {
+      loadEr();
+    } else if (state.er.fitLater) {
+      fitEr();
+    }
+  };
+
   // --- starting ---------------------------------------------------------------------------------------
 
   /** The key of the session: from behind the # of the address, once, and from then on from the tab's own store. */
@@ -1022,9 +1746,12 @@ const SCRIPT = String.raw`
   };
 
   const show = (view) => {
-    for (const name of ["table", "sql", "api"]) {
+    for (const name of ["table", "sql", "api", "export", "clear", "er"]) {
       byId("view-" + name).hidden = name !== view;
       byId("tab-" + name).classList.toggle("current", name === view);
+    }
+    if (view === "er") {
+      showEr();
     }
   };
 
@@ -1035,9 +1762,15 @@ const SCRIPT = String.raw`
   }
   buildConsole();
   buildApi();
+  buildExport();
+  buildClear();
+  buildEr();
   byId("tab-table").addEventListener("click", () => show("table"));
   byId("tab-sql").addEventListener("click", () => show("sql"));
   byId("tab-api").addEventListener("click", () => show("api"));
+  byId("tab-export").addEventListener("click", () => show("export"));
+  byId("tab-clear").addEventListener("click", () => show("clear"));
+  byId("tab-er").addEventListener("click", () => show("er"));
   byId("refresh").addEventListener("click", async () => {
     await poll();
     if (connected()) {

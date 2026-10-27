@@ -510,11 +510,12 @@ export class SqliteRuntime implements RelationalRuntime {
     };
   }
 
-  snapshot(): DatabaseState {
+  snapshot(only?: readonly string[]): DatabaseState {
     const collections: Record<string, Row[]> = {};
     const tables = new Map(this.schema.map((table) => [table.name, table]));
+    const wanted = only === undefined ? undefined : new Set(only);
     for (const name of [...this.#collectionOrder, ...this.schema.map((table) => table.name)]) {
-      if (Object.hasOwn(collections, name)) {
+      if (Object.hasOwn(collections, name) || (wanted !== undefined && !wanted.has(name))) {
         continue;
       }
       const table = tables.get(name);

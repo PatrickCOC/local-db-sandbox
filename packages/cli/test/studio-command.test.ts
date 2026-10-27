@@ -110,7 +110,8 @@ describe("CLI: studio", { timeout: 120_000 }, () => {
     it("prints its help, which says how a database is opened and that the page is this machine's own", async () => {
       const { code, stdout, stderr } = await run("studio", "--help");
       assert.deepEqual([code, stderr], [0, ""]);
-      assert.match(stdout, /^Usage: local-db-sandbox studio <database> \[options\]\n/);
+      assert.match(stdout, /^Usage: local-db-sandbox studio \[database\] \[options\]\n/);
+      assert.match(stdout, /Without it, Studio opens the project's database: the one\s+\.local-db-sandbox\/sandbox\.config\.json names \(init-nest\), or\s+\.local-db-sandbox\/sandbox\.db \(init, init-pg\)/);
       assert.match(stdout, /A directory that no process has open/);
       assert.match(stdout, /A database that a sandbox has open/);
       assert.match(stdout, /A single file\s+Read-only, always\./);
@@ -123,7 +124,7 @@ describe("CLI: studio", { timeout: 120_000 }, () => {
       // The page is served nowhere else: there is no option for it.
       assert.doesNotMatch(stdout, /--host/);
       const main = (await run("--help")).stdout;
-      assert.match(main, /local-db-sandbox studio <database> \[options\]/);
+      assert.match(main, /local-db-sandbox studio \[database\] \[options\]/);
       assert.match(main, /"studio" opens Local DB Studio, a page that shows and changes what is in a database; see "local-db-sandbox studio --help"\./);
     });
 
@@ -134,8 +135,7 @@ describe("CLI: studio", { timeout: 120_000 }, () => {
         assert.match(stderr, message, argv.join(" "));
         assert.match(stderr, /\nRun "local-db-sandbox studio --help" for usage\.\n$/);
       };
-      await fails([], /^Error: Missing the database\./);
-      await fails([database, file], /^Error: Expected exactly one database\./);
+      await fails([database, file], /^Error: Expected one database at most\./);
       await fails([database, "--port", "x"], /^Error: --port must be an integer from 0 to 65535\./);
       await fails([database, "--port", "70000"], /^Error: --port must be an integer from 0 to 65535\./);
       await fails([database, "--host", "0.0.0.0"], /^Error: Unknown option '--host'/);

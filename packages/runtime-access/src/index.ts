@@ -8,6 +8,8 @@ export type {
   BrowseRequest,
   BrowseResult,
   ChangeResult,
+  ClearRequest,
+  ClearResult,
   ColumnInfo,
   EventsResult,
   FilterOperator,
@@ -18,12 +20,16 @@ export type {
   RowResult,
   RuntimeAccess,
   SchemaInfo,
+  SnapshotRequest,
+  SnapshotResult,
   SqlRequest,
   SqlResult,
   StatementResult,
   TableInfo,
 } from "./access.ts";
 export { INSERT_TIME, LocalRuntimeAccess, SINGLE_FILE_READ_ONLY, STUDIO_REQUEST_ID } from "./local-access.ts";
+// How an answer of the access writes a canonical type (`ColumnInfo.canonicalType`), for whoever shows a snapshot's definitions as it does (Studio's ER diagram, D-053).
+export { formatCanonicalType } from "../../runtime/src/index.ts";
 export type { AccessIdentity, LocalAccessOptions } from "./local-access.ts";
 export { answerAccessRequest, startControlServer } from "./control-server.ts";
 export type { AccessAnswer, ControlServer, ControlServerOptions } from "./control-server.ts";

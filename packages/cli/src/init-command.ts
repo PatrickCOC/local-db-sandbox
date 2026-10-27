@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { MigrationError, MigrationSourceError, MigrationSyntaxError, collectPostgresMigrations, findMigrationsDirectory, summarizeReport } from "../../import-postgres/src/index.ts";
 import type { CollectedSchema, ReportCategory, ReportEntry } from "../../import-postgres/src/index.ts";
@@ -7,13 +7,17 @@ import { DatabaseOwnedError, claimDatabaseIfThere, maxFileSizeMbProblem } from "
 import type { DatabaseClaim } from "../../storage-json/src/index.ts";
 import { bootstrapDatabase } from "./bootstrap.ts";
 import type { CliIo } from "./cli.ts";
+import { describeGitignore, ignoreSandboxFiles } from "./gitignore.ts";
+import { nextSteps, shownPath, studioCommand, writeFailureReason } from "./project-paths.ts";
 
-export const INIT_USAGE = `Usage: local-db-sandbox init <project-or-migrations> [options]
+export const INIT_USAGE = `Usage: local-db-sandbox init [project-or-migrations] [options]
 
 Creates a sandbox database from a project's PostgreSQL migrations, without a
-running database. <project-or-migrations> is a directory of .sql migrations,
+running database. [project-or-migrations] is a directory of .sql migrations,
 or a project that keeps them in supabase/migrations, migrations,
-db/migrations, database/migrations, or sql/migrations.
+db/migrations, database/migrations, or sql/migrations (default: the current
+directory). For a NestJS + TypeORM project, use init-nest; to read the schema
+of a running PostgreSQL database, use init-pg.
 
 The migrations are read with PostgreSQL's own parser and applied in order to
 work out the tables they leave: columns, keys, foreign keys, unique
@@ -30,9 +34,13 @@ Options:
                          process has the database open: stop that process first.
       --strict           Fail, writing nothing, if a statement is unsupported
       --max-file-size <MB> Largest database to accept
+      --no-gitignore     Leave .gitignore alone. By default, the paths this writes (the database,
+                         its report, and the files a sandbox keeps beside it) are added to the
+                         .gitignore of the project's Git repository, when the database is in it
   -h, --help             Show this help
 
-Then serve it, for example to supabase-js clients:
+Then look into it, or serve it to supabase-js clients:
+  local-db-sandbox studio <database>
   local-db-sandbox postgrest <database>
 `;
 
@@ -119,6 +127,7 @@ export async function runInit(argv: string[], io: CliIo): Promise<number> {
         force: { type: "boolean" },
         strict: { type: "boolean" },
         "max-file-size": { type: "string" },
+        "no-gitignore": { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -130,8 +139,8 @@ export async function runInit(argv: string[], io: CliIo): Promise<number> {
     io.stdout.write(INIT_USAGE);
     return 0;
   }
-  if (positionals.length !== 1) {
-    return fail(positionals.length === 0 ? "Missing the project or migrations directory." : "Expected exactly one project or migrations directory.");
+  if (positionals.length > 1) {
+    return fail("Expected one project or migrations directory at most.");
   }
   let maxFileSizeMb: number | undefined;
   if (values["max-file-size"] !== undefined) {
@@ -142,12 +151,15 @@ export async function runInit(argv: string[], io: CliIo): Promise<number> {
     }
   }
 
-  const source = resolve(positionals[0] as string);
+  const source = resolve(positionals[0] ?? ".");
   let migrations: string;
   try {
     migrations = findMigrationsDirectory(source);
   } catch (error) {
-    return fail(error instanceof Error ? error.message : String(error));
+    // A project of the other kind is told which command is for it.
+    const nest = existsSync(join(source, "nest-cli.json")) || existsSync(join(source, "src", "main.ts"));
+    const hint = nest ? " This looks like a NestJS project: for NestJS + TypeORM, use init-nest." : " To read the schema of a running PostgreSQL database instead, use init-pg.";
+    return fail(`${error instanceof Error ? error.message : String(error)}${error instanceof MigrationSourceError ? hint : ""}`);
   }
   // The project is what was given, unless the migrations directory itself was given.
   const project = migrations === source ? process.cwd() : source;
@@ -205,15 +217,27 @@ export async function runInit(argv: string[], io: CliIo): Promise<number> {
         ...(maxFileSizeMb !== undefined && { maxFileSizeMb }),
       }));
     } catch (error) {
-      return fail(`The database could not be created: ${error instanceof Error ? error.message : String(error)}`);
+      const reason = writeFailureReason(error);
+      return fail(`The database could not be created at ${shownPath(database)}: ${error instanceof Error ? error.message : String(error)}${reason === undefined ? "" : ` (${reason})`}`);
     }
-    mkdirSync(dirname(reportPath), { recursive: true });
-    writeFileSync(reportPath, `${JSON.stringify(reportDocument(collected, database, rows), null, 2)}\n`);
+    try {
+      mkdirSync(dirname(reportPath), { recursive: true });
+      writeFileSync(reportPath, `${JSON.stringify(reportDocument(collected, database, rows), null, 2)}\n`);
+    } catch (error) {
+      const reason = writeFailureReason(error);
+      io.stderr.write(`Warning: the database was created, and its report could not be written to ${shownPath(reportPath)}: ${reason ?? (error instanceof Error ? error.message : String(error))}.\n`);
+    }
 
-    const shown = relative(process.cwd(), database) || database;
+    const ignore = values["no-gitignore"] === true ? [] : describeGitignore(await ignoreSandboxFiles(project, { database, format: "directory", report: reportPath }), (path) => shownPath(path));
     io.stdout.write(
-      `${describeCollection(collected, database, rows, reportPath).join("\n")}\n` +
-        `Next: local-db-sandbox postgrest ${/\s/.test(shown) ? JSON.stringify(shown) : shown}\n`,
+      `${[
+        ...describeCollection(collected, database, rows, reportPath),
+        ...ignore,
+        ...nextSteps([
+          { command: studioCommand(database), why: "look into the rows, and change them" },
+          { command: `local-db-sandbox postgrest ${shownPath(database)}`, why: "serve the database to supabase-js clients" },
+        ]),
+      ].join("\n")}\n`,
     );
     return 0;
   } finally {

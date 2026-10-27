@@ -39,6 +39,10 @@ export interface Browser {
   evaluate<T = unknown>(expression: string): Promise<T>;
   /** Waits until an expression is true in the page; fails with what the page shows when it never is. */
   until(expression: string, what: string, timeoutMs?: number): Promise<void>;
+  /** A real mouse: pressed, moved, or released at a point of the page (CSS pixels), or its wheel turned there. */
+  mouse(type: "mousePressed" | "mouseMoved" | "mouseReleased" | "mouseWheel", x: number, y: number, deltaY?: number): Promise<void>;
+  /** What the page shows now, as a PNG. */
+  screenshot(): Promise<Buffer>;
   close(): Promise<void>;
 }
 
@@ -145,6 +149,12 @@ export async function openBrowser(): Promise<{ browser?: Browser; unavailable?: 
           }
           await delay(100);
         }
+      },
+      async mouse(type, x, y, deltaY) {
+        await send("Input.dispatchMouseEvent", { type, x, y, button: type === "mouseMoved" || type === "mouseWheel" ? "none" : "left", buttons: type === "mouseReleased" || type === "mouseWheel" ? 0 : 1, clickCount: type === "mouseMoved" || type === "mouseWheel" ? 0 : 1, ...(type === "mouseWheel" && { deltaX: 0, deltaY: deltaY ?? 0 }) });
+      },
+      async screenshot() {
+        return Buffer.from((await send("Page.captureScreenshot", { format: "png" })).data, "base64");
       },
       async close() {
         socket.close();

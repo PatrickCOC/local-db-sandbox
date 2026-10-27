@@ -5,13 +5,19 @@ import { DEFAULT_STUDIO_PORT, startStudio } from "../../studio/src/index.ts";
 import type { StudioStatus } from "../../studio/src/index.ts";
 import type { CliIo } from "./cli.ts";
 import { isPort } from "./config.ts";
+import { findProjectDatabase, shownPath } from "./project-paths.ts";
+import { exportSqlForStudio } from "./sql-export.ts";
 
-export const STUDIO_USAGE = `Usage: local-db-sandbox studio <database> [options]
+export const STUDIO_USAGE = `Usage: local-db-sandbox studio [database] [options]
 
 Opens Local DB Studio on a JSON database: a page in your browser that shows
 the tables and their rows, adds, changes, and removes rows, and runs SQL.
-<database> is a database directory (sandbox.db) or a single file
-(sandbox.db.json). Everything is carried out by the sandbox's relational
+[database] is a database directory (sandbox.db) or a single file
+(sandbox.db.json). Without it, Studio opens the project's database: the one
+.local-db-sandbox/sandbox.config.json names (init-nest), or
+.local-db-sandbox/sandbox.db (init, init-pg), found from the current
+directory or above, and says which; when the project has both, name one. With
+the configuration of init-nest, the API tab starts from the sandbox's address. Everything is carried out by the sandbox's relational
 runtime (SQLite in memory); a change is saved as a sandbox saves it.
 
 How the database is opened follows from what it is and from who has it open:
@@ -42,6 +48,12 @@ its status, duration, headers, and body. Studio does not start the API:
 start it as you do, against the sandbox's database, and give its address in
 the tab, or with --api. Redirects are shown, not followed. Nothing of a
 request or its answer is logged or kept.
+
+The Export tab writes the tables you choose as an SQL script for PostgreSQL,
+which the page offers as a .sql file: the schema only, the data only, or
+both. It reads the database and changes nothing. An export with data holds
+the rows as they are, which may be data you entered, and is made only when
+you confirm that. What cannot be written as it is refuses the export.
 
 Options:
   -p, --port <number>      Port of the page (default: ${DEFAULT_STUDIO_PORT}; 0 = any free port)
@@ -97,8 +109,8 @@ export async function runStudio(argv: string[], io: CliIo): Promise<number> {
     io.stdout.write(STUDIO_USAGE);
     return 0;
   }
-  if (positionals.length !== 1) {
-    return fail(positionals.length === 0 ? "Missing the database." : "Expected exactly one database.");
+  if (positionals.length > 1) {
+    return fail("Expected one database at most.");
   }
   let port: number | undefined;
   if (values.port !== undefined) {
@@ -115,7 +127,20 @@ export async function runStudio(argv: string[], io: CliIo): Promise<number> {
       return fail(problem);
     }
   }
-  const database = resolve(positionals[0] as string);
+  let database: string;
+  let api = values.api;
+  if (positionals[0] !== undefined) {
+    database = resolve(positionals[0]);
+  } else {
+    const found = findProjectDatabase();
+    if (found.status !== "found") {
+      return fail(found.message);
+    }
+    database = found.database;
+    // The sandbox of init-nest listens where its configuration says: the API tab starts there.
+    api ??= found.port === undefined || found.port === 0 ? undefined : `http://127.0.0.1:${found.port}/`;
+    io.stdout.write(`Opening ${shownPath(database)} (from ${found.source}).\n`);
+  }
 
   let studio;
   try {
@@ -123,9 +148,10 @@ export async function runStudio(argv: string[], io: CliIo): Promise<number> {
       database,
       ...(port !== undefined && { port }),
       ...(values["read-only"] && { readOnly: true }),
-      ...(values.api !== undefined && { api: values.api }),
+      ...(api !== undefined && { api }),
       ...(maxFileSizeMb !== undefined && { maxFileSizeMb }),
       onSizeWarning: (warning) => io.stderr.write(`${formatSizeWarning(warning)}\n`),
+      exporter: exportSqlForStudio,
     });
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;

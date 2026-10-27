@@ -1,5 +1,6 @@
 import type { DatabaseFormat } from "../../storage-json/src/index.ts";
 import { startStudioServer } from "./server.ts";
+import type { StudioExporter } from "./server.ts";
 import { openStudioSession } from "./session.ts";
 import type { StudioMode, StudioSessionOptions, StudioStatus } from "./session.ts";
 
@@ -10,6 +11,8 @@ export interface StartStudioOptions extends StudioSessionOptions {
   port?: number;
   /** The address of a local API that the API tab starts from. Only a loopback address is taken. */
   api?: string;
+  /** What writes the Export tab's script. */
+  exporter?: StudioExporter;
 }
 
 export interface RunningStudio {
@@ -37,7 +40,12 @@ export async function startStudio(options: StartStudioOptions): Promise<RunningS
   const session = await openStudioSession(options);
   let server;
   try {
-    server = await startStudioServer({ session, ...(options.port !== undefined && { port: options.port }), ...(options.api !== undefined && { api: options.api }) });
+    server = await startStudioServer({
+      session,
+      ...(options.port !== undefined && { port: options.port }),
+      ...(options.api !== undefined && { api: options.api }),
+      ...(options.exporter !== undefined && { exporter: options.exporter }),
+    });
   } catch (error) {
     await session.close();
     throw error;

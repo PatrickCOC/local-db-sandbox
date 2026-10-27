@@ -1,8 +1,12 @@
+import { resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { findMigrationsDirectory } from "../../import-postgres/src/index.ts";
 import { DEFAULT_NEST_SANDBOX_PORT, initNest } from "../../nest-typeorm/src/index.ts";
 import type { CliIo } from "./cli.ts";
 import { isPort } from "./config.ts";
+import { describeGitignore, ignoreSandboxFiles } from "./gitignore.ts";
 import { describeCollection, describeIssue } from "./import-command.ts";
+import { nextSteps, shownPath, studioCommand } from "./project-paths.ts";
 
 export const INIT_NEST_USAGE = `Usage: local-db-sandbox init-nest [entry] [options]
 
@@ -25,7 +29,14 @@ Options:
   -o, --out <path>       Database: a directory, or a single file when the path ends in .json
                          (default: the project's database, or sandbox.db in the project root)
       --entities <path>  File or folder to read TypeORM entities from (default: the entry's folder)
+      --no-gitignore     Leave .gitignore alone. By default, the database and the files a sandbox
+                         keeps beside it are added to the .gitignore of the project's Git
+                         repository, when the database is in it; the sandbox's configuration
+                         (.local-db-sandbox/sandbox.config.json, sandbox.server.ts) is not
   -h, --help             Show this help
+
+For a project with PostgreSQL migrations, use init; to read the schema of a
+running PostgreSQL database, use init-pg.
 `;
 
 /** Runs `init-nest` and resolves with the process exit code. */
@@ -44,6 +55,7 @@ export async function runInitNest(argv: string[], io: CliIo): Promise<number> {
         port: { type: "string", short: "p" },
         out: { type: "string", short: "o" },
         entities: { type: "string" },
+        "no-gitignore": { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -70,7 +82,17 @@ export async function runInitNest(argv: string[], io: CliIo): Promise<number> {
   try {
     result = await initNest({ entry: positionals[0], port, database: values.out, entities: values.entities });
   } catch (error) {
-    return fail(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    // A project of the other kind is told which command is for it.
+    let hint = "";
+    if (positionals[0] === undefined && /^Entry point does not exist/.test(message)) {
+      try {
+        hint = ` This directory has PostgreSQL migrations (${shownPath(findMigrationsDirectory(process.cwd()))}): for those, use init.`;
+      } catch {
+        hint = "";
+      }
+    }
+    return fail(`${message}${hint}`);
   }
 
   const count = result.import.collections.length;
@@ -102,12 +124,20 @@ export async function runInitNest(argv: string[], io: CliIo): Promise<number> {
     lines.push(`${script.status === "added" ? "Added" : "Updated"} the "${script.name}" script ${script.status === "added" ? "to" : "in"} package.json.`);
   }
   lines.push(...result.warnings.map((warning) => `Warning: ${warning}`));
+  const databasePath = resolve(result.root, database.file);
+  if (values["no-gitignore"] !== true) {
+    lines.push(...describeGitignore(await ignoreSandboxFiles(result.root, { database: databasePath, format: database.format }), (path) => shownPath(path)));
+  }
+  if (script.status === "different") {
+    lines.push(`package.json already has a different "${script.name}" script; the sandbox is started with the command below.`);
+  }
   lines.push(
-    script.status === "different"
-      ? `package.json already has a different "${script.name}" script; start the sandbox with: ${script.command}`
-      : `Start the sandbox with: npm run ${script.name}   (restarts when the application's sources change)`,
-    `Start it once, without watching: ${script.runCommand}`,
     "The application's own sources and start command are unchanged.",
+    ...nextSteps([
+      { command: script.status === "different" ? script.command : `npm run ${script.name}`, why: "start the application on the sandbox database; it restarts when its sources change" },
+      { command: script.runCommand, why: "or start it once, without watching" },
+      { command: studioCommand(databasePath), why: "then, in a second terminal: look into the rows, and send requests to the application" },
+    ]),
   );
   io.stdout.write(`${lines.join("\n")}\n`);
   return 0;

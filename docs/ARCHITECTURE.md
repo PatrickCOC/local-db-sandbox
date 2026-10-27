@@ -4,6 +4,8 @@
 
 The core domain must stay portable. npm is a delivery mechanism, not an architectural dependency.
 
+The package has three runtime dependencies, each loaded on first use by the one file that may import it (checked by `packages/cli/test/boundaries.test.ts`): `libpg-query`, PostgreSQL's parser (`packages/import-postgres/src/parser.ts`, D-034); `postgres`, the client that `init-pg` reads a server's catalog with (`packages/import-postgres/src/pg-client.ts`, D-049); and `@dagrejs/dagre`, the layout of Studio's ER diagram (`packages/studio/src/diagram.ts`, D-053). Their licenses are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ## Layers
 
 ### Core
@@ -133,7 +135,7 @@ From a project's schema source to a sandbox database, without a running database
 ```text
 supabase/migrations/*.sql
    v  ordered by version (migrations.ts)
-libpg-query                         PostgreSQL 18's own parser (WebAssembly); the one runtime dependency, loaded on first use
+libpg-query                         PostgreSQL 18's own parser (WebAssembly); a runtime dependency, loaded on first use
    v  parse trees, byte positions
 collector (packages/import-postgres)   applies each statement to a model of the public schema;
    |                                   one report entry per statement: applied, seeded, retained,
@@ -148,6 +150,24 @@ Boundaries:
 - Reading PostgreSQL stays in `packages/import-postgres`: its parse tree, type names, default functions, naming rules, and catalog rules. (Writing PostgreSQL is the migration generator's, `packages/migration/src/postgres`, below; it imports neither the collector nor the parser.) What leaves it is the sandbox's canonical schema (`TableSchema[]` and `SchemaTypes`, D-033 and D-036), seed rows as fixture values, and a structured report. The runtime, the storage, the PostgREST endpoint, and the schema diff know nothing of PostgreSQL, and do not import the collector. A test checks the import graph (`packages/cli/test/boundaries.test.ts`): what each source imports, followed through. It cannot see a module loaded under a name worked out at run time, so those packages may not load anything that way (`import()` or `require()` of a value, `createRequire`).
 - The parser (`libpg-query`) is imported in one file, `parser.ts`, with `import()` on first use. It is loaded when migrations are collected (`init`, and `diff-schema`, `plan-migration`, or `generate-migration` given migrations), when `generate-migration` gives the SQL it generated to the parser before it prints it (`sql-check.ts`, D-039), and by no other command. The same test starts the CLI in a process of its own that records every module it resolves, runs the other commands there (the two that serve included), and finds the parser resolved by none of them.
 - The collector does not write files; `bootstrapDatabase` does not know where definitions came from; `init` (CLI) composes the two and formats terminal lines from the report.
+
+From a running PostgreSQL database (`init-pg`, D-049), the same way, with the catalog in place of the migration files:
+
+```text
+PostgreSQL server (the host the user names)
+   v  one connection, one READ ONLY transaction, SELECTs of pg_catalog only, rolled back (pg-client.ts)
+postgres (postgres.js)              the client; a runtime dependency, loaded on first use by init-pg alone
+   v  catalog rows
+catalog-scan.ts                     writes the catalog as the statements that would create it, with PostgreSQL's own
+   |                                format_type / pg_get_expr / pg_get_constraintdef / pg_get_indexdef; notes what it leaves out
+   v  schema-scan.sql (in memory)
+collector (packages/import-postgres)   as above: canonical schema + report; no rows
+   v
+bootstrapDatabase (packages/cli)  ->  sandbox.db
+```
+
+- Reading a server is in `packages/import-postgres` too (rule 8a): the client is imported in one file, `pg-client.ts`, with `import()` on first use, and no other command loads it (the same import-graph test). The connection string is taken apart there and never handed on whole.
+- There is one way into the canonical schema: what the catalog holds goes through the collector, so a scanned schema and a migrated one mean the same things.
 - A database directory does not store definitions that its own reader would refuse: the schema document is read back before anything is written (D-036). A source of definitions with a defect fails at the save, not at the next start.
 - Where each object comes from is part of the definitions themselves (D-036), and so is stored with the database. The report keeps a summary and the migrations' hashes.
 
@@ -324,12 +344,12 @@ StudioSession                            which way the database is open:
 
 **Who has a database open** (`packages/storage-json/src/writer-owner.ts`). One process has a database open to write at a time. It says so in a record beside the database (`<database>.owner.json`: process, since when, a name for this one claim, what kind of sandbox it is, the database's canonical path, and where it serves its runtime). The record is not part of the database, and no format knows it. A database is claimed before it is read; a live owner's record is never taken; one whose process is gone, or whose owner no longer answers where it served, is taken over. The REST sandbox, the PostgREST endpoint, the NestJS sandbox module, the `sql` command when it may save, and a standalone Studio claim; what a script opens for a moment through the library does not. `init --force` claims the database it replaces for as long as it replaces it (kind `init`, D-043), so that it is refused one that a process has open, and no process opens the database meanwhile; it serves nothing, and its record is gone when the command ends. The other commands that write a database (`convert`, `import-typeorm`, `init-nest`, `migrate`) ask no record. A sandbox that is refused a database which a Studio has to itself is told how the database is handed over, and so is whoever started that Studio (a notice of the session, which the command prints and the page shows): the user stops Studio, starts the sandbox, and starts Studio again. No process lets go of a database because another asked, and none starts another.
 
-**The runtime's access** (`packages/runtime-access`). What is asked of a runtime that someone has open, as data: `RuntimeAccess`, with nine operations (`info`, `schema`, `browse`, `row`, `insert`, `update`, `delete`, `sql`, `events`).
+**The runtime's access** (`packages/runtime-access`). What is asked of a runtime that someone has open, as data: `RuntimeAccess`, with eleven operations (`info`, `schema`, `browse`, `row`, `insert`, `update`, `delete`, `sql`, `events`, `clear`, D-051: every row of chosen tables, deleted in one transaction, refused when a table that is not chosen refers to one that is; and `snapshot`, D-050: the definitions of chosen tables and, when asked for, all their rows, whole, read at one moment, bounded by `maxSnapshotBytes`).
 
 - `LocalRuntimeAccess` is the one implementation, on a `RelationalRuntime` that stays whoever's it is. Rows are read and changed through the Query IR and the column codec; the console hands whole statements to the runtime. It executes nothing itself, and nothing else executes for it.
 - One call to the runtime can say that it must change nothing, how many rows it wants at most, and what it runs for (`ExecuteOptions`): a runtime that an application has open is not opened a second time for someone who only wants to look. While the application has a transaction open, the access does nothing and says that the runtime is busy.
 - Every answer is bounded (`AccessLimits`), and every refusal is an `AccessError` with a code.
-- The control (`control-server.ts`, `control-client.ts`) serves an access to other processes of the machine: HTTP on 127.0.0.1, a random token that is in the owner's record alone, the nine operations and nothing else. `serveRuntime` is what an owner calls. `ControlClient` is made for one owner; it sends nothing twice, and tells apart a request that was not sent, one whose outcome is not known, and an answer that is not the owner's.
+- The control (`control-server.ts`, `control-client.ts`) serves an access to other processes of the machine: HTTP on 127.0.0.1, a random token that is in the owner's record alone, the eleven operations and nothing else. `serveRuntime` is what an owner calls. `ControlClient` is made for one owner; it sends nothing twice, and tells apart a request that was not sent, one whose outcome is not known, and an answer that is not the owner's.
 - `AttachedRuntimeAccess` is access to a database for as long as some process has it open: it finds the owner by the record, checks that what answers is that owner with that database, and finds the next owner after a restart. A request that changes nothing is asked again of the new owner; a change is sent once, to the owner it is attached to, and never again. It never claims a database.
 - `ReadOnlyAccess` stands before an access through which nothing may be changed.
 
@@ -340,7 +360,25 @@ Boundaries, checked by the import-graph test:
 - The access reaches the runtime, the storage's record of the owner, and the SQL console's statement splitter. It knows no adapter: no HTTP server of an application, no ORM, no CLI.
 - Studio's own files import the access, the storage, and the one function that opens a database on the runtime (`SqlConsole.open`). They import no runtime, and nothing that serves an application.
 - Only the CLI imports Studio. The processes that own a database know the access, and not who looks through it. The PostgREST package reaches the runtime, the storage, and the core as before: it claims its database, and the `postgrest` command serves its runtime.
-- Neither package adds a dependency, and neither loads the PostgreSQL parser.
+- Neither package loads the PostgreSQL parser. The access adds no dependency. Studio has one: the layout of the ER diagram (`@dagrejs/dagre`, D-053), imported in `diagram.ts` alone, on first use; the page loads no library.
+
+The Export tab (D-050) is composed the same way. Studio's server takes a snapshot of the chosen tables through the access and hands it to an exporter that whoever started Studio gave it; Studio knows no SQL dialect. The CLI gives `exportSqlForStudio` (`packages/cli/src/sql-export.ts`): the script is written by `exportPostgresSql` (`packages/migration/src/postgres/export.ts`), whose definitions are the PostgreSQL generator's migration from an empty schema and whose rows are the generator's constants, and the definitions are given to PostgreSQL's parser before the script is offered.
+
+```text
+Studio's page  -- POST /api/export -->  Studio's server  -- snapshot -->  the runtime's access (local, or the owner's through the control)
+                                              |
+                                              v  exporter (given by the CLI)
+                                        exportPostgresSql  ->  checkSqlStatements (parser)  ->  the script, as a .sql file in the page
+```
+
+The ER Diagram tab (D-053) reads the same snapshot, without rows. Studio's server turns the tables' canonical definitions into boxes and foreign keys (`diagramOf`, `packages/studio/src/diagram.ts`), and places the boxes with Dagre, which that file alone imports, on first use (`layoutDiagram`). The page gets the diagram with its places and draws it as SVG with its own script: lines from column to column, zoom, pan, search, and dragging are the page's, and nothing of them is sent back.
+
+```text
+Studio's page  -- POST /api/diagram { tables } -->  Studio's server  -- snapshot (rows: false) -->  the runtime's access
+      ^                                                    |
+      |                                                    v  diagramOf (TableSchema -> tables, foreign keys)  ->  layoutDiagram (Dagre)
+      +------------------ the diagram, with places --------+
+```
 
 Not implemented: anything that changes a table's definition, a page for the runtime's events, attaching to the REST sandbox (which has no relational runtime), and access from another machine.
 

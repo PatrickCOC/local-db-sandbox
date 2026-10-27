@@ -4,13 +4,13 @@ A local database sandbox for developing an application against a disposable copy
 
 From a project's own schema (TypeORM entities or PostgreSQL migrations) it creates a local database, runs the project's backend against it, and lets you look into and change the data in the browser (Local DB Studio), send requests to the backend, try a SQL script on a throwaway copy, and compare schemas. It can also serve a JSON file as a mock REST API.
 
-Everything runs on this machine. Apart from the mock REST API, which has a JSON engine of its own, it runs on SQLite. It is a development tool: not a replacement for PostgreSQL, MySQL, or a production backend, and it connects to no database server.
+Everything runs on this machine. Apart from the mock REST API, which has a JSON engine of its own, it runs on SQLite. It is a development tool: not a replacement for PostgreSQL, MySQL, or a production backend. The one command that connects to a database server is `init-pg`, which only reads a PostgreSQL schema from the catalog, in a read-only transaction.
 
 **Read next:** the [User Guide](https://github.com/PatrickCOC/local-db-sandbox/blob/main/docs/USER_GUIDE.md) (Traditional Chinese) walks through the daily workflows; the [Reference](https://github.com/PatrickCOC/local-db-sandbox/blob/main/docs/REFERENCE.md) describes every command, option, and file format. `local-db-sandbox <command> --help` describes each command.
 
 ## Status: npm beta
 
-The current release is **`0.1.0-beta.1`** on npm ([`local-db-sandbox`](https://www.npmjs.com/package/local-db-sandbox), dist-tags `beta` and `latest`). It is a beta for personal and team development use:
+This is **`0.2.0-beta.1`** of [`local-db-sandbox`](https://www.npmjs.com/package/local-db-sandbox) on npm, installed with the `beta` tag. It is a beta for personal and team development use. New in 0.2.0: `init-pg` (a schema from a running PostgreSQL database), and Studio's Export (tables as a PostgreSQL script), Clear data, and ER Diagram tabs.
 
 - Most commands are marked experimental. Commands, options, and file formats may still change before 1.0; a database of an earlier format is read and is brought to the current one with `local-db-sandbox migrate`.
 - It is tested on Node.js 22 with NestJS 10 and 12, TypeORM 0.3.17 and 0.3.31, and supabase-js 2.
@@ -22,11 +22,12 @@ The current release is **`0.1.0-beta.1`** on npm ([`local-db-sandbox`](https://w
 |---|---|---|
 | NestJS + TypeORM, with the default data source set up by `TypeOrmModule.forRoot` / `forRootAsync` | `init-nest` | `sandbox.db` made from the entities, and `npm run sandbox`: your own backend on it, at `http://127.0.0.1:3001` |
 | PostgreSQL migrations (`supabase/migrations`, `migrations`, `db/migrations`, `database/migrations`, `sql/migrations`) | `init` | `.local-db-sandbox/sandbox.db`, made from the migrations with PostgreSQL's own parser |
+| A running PostgreSQL database (no migrations or ORM needed) | `init-pg` | `.local-db-sandbox/sandbox.db`, made from the schema in its catalog, read-only; no rows are copied |
 | An application that uses supabase-js | `init`, then `postgrest` | a subset of PostgREST at `http://127.0.0.1:54321` |
 | A frontend that needs a mock REST API | a JSON file | CRUD routes, filters, and simulated delays and errors at `http://127.0.0.1:4783` |
 | Tests in Node | the library | `startSandbox`, `createSandboxDataSource`, `SandboxModule` |
 
-On any of these databases: Local DB Studio (`studio`), a SQL console (`sql`), a SQL script on a copy (`simulate`), and schema comparison (`diff-schema`, `plan-migration`, and `generate-migration`, which writes PostgreSQL).
+On any of these databases: Local DB Studio (`studio`, with an Export tab that writes tables as a PostgreSQL script, and an ER Diagram tab), a SQL console (`sql`), a SQL script on a copy (`simulate`), and schema comparison (`diff-schema`, `plan-migration`, and `generate-migration`, which writes PostgreSQL).
 
 ## Prerequisites
 
@@ -40,7 +41,7 @@ From npm, into the project you develop:
 
 ```sh
 npm install --save-dev local-db-sandbox@beta
-npx local-db-sandbox --version          # 0.1.0-beta.1
+npx local-db-sandbox --version          # 0.2.0-beta.1
 ```
 
 To try it without installing: `npx local-db-sandbox@beta --help`.
@@ -67,16 +68,16 @@ npm run sandbox                     # your backend on the local database, at htt
 In a second terminal:
 
 ```sh
-npx local-db-sandbox studio sandbox.db --api http://127.0.0.1:3001/
+npx local-db-sandbox studio      # in the project: finds sandbox.db and the sandbox's address by itself
 ```
 
-Open the address Studio prints. Studio is attached to the running sandbox: **Rows** and **SQL** show what the backend writes, and the **API** tab sends requests to it. Before you point a real application at the sandbox, turn on mail capture and the network guard; see the User Guide, "Safety".
+Open the address Studio prints. Studio is attached to the running sandbox: **Rows** and **SQL** show what the backend writes, the **API** tab sends requests to it, **Export** writes tables as a PostgreSQL script, **Clear data** empties chosen tables in one transaction, and **ER Diagram** draws the tables with their keys and foreign keys. Every init command adds the files it generated to the project's `.gitignore` (`--no-gitignore` to leave it alone), and ends with the next commands to run. Before you point a real application at the sandbox, turn on mail capture and the network guard; see the User Guide, "Safety".
 
 ### PostgreSQL migrations
 
 ```sh
-npx local-db-sandbox init .                              # .local-db-sandbox/sandbox.db
-npx local-db-sandbox studio .local-db-sandbox/sandbox.db
+npx local-db-sandbox init                                # reads the current directory; writes .local-db-sandbox/sandbox.db
+npx local-db-sandbox studio                              # opens the project's database
 ```
 
 For a supabase-js application, serve the database instead, and set the application's Supabase URL to `http://127.0.0.1:54321` (any key is accepted). Studio started on the same database then attaches to the endpoint.
@@ -84,6 +85,15 @@ For a supabase-js application, serve the database instead, and set the applicati
 ```sh
 npx local-db-sandbox postgrest .local-db-sandbox/sandbox.db
 ```
+
+### A running PostgreSQL database
+
+```sh
+PGPASSWORD=... npx local-db-sandbox init-pg postgresql://reader@127.0.0.1:5432/app    # reads the catalog only
+npx local-db-sandbox studio .local-db-sandbox/sandbox.db
+```
+
+Use a read-only role; `--schema <name>` reads another schema than `public`. See the Reference, "From a Running PostgreSQL Database".
 
 ### Try a SQL script on a copy
 
@@ -113,10 +123,11 @@ local-db-sandbox <command> --help
 | Command | What it does |
 |---|---|
 | `local-db-sandbox <database>` | Serves a JSON database (a file such as `db.json`, or a database directory) as a local REST API |
-| `init <project-or-migrations>` | Creates a database from a project's PostgreSQL migrations |
+| `init [project-or-migrations]` | Creates a database from a project's PostgreSQL migrations (the current directory by default) |
+| `init-pg <connection-url>` | Creates a database from the schema of a running PostgreSQL database, reading its catalog only |
 | `init-nest [entry]` | Sets up a sandbox server for a NestJS + TypeORM project (`npm run sandbox`) |
 | `import-typeorm <path>` | Creates a database file from TypeORM entities |
-| `studio <database>` | Opens Local DB Studio in the browser |
+| `studio [database]` | Opens Local DB Studio in the browser (the project's database by default) |
 | `sql <database> ["<SQL>"]` | Opens a SQL console on a database, or runs one statement |
 | `simulate <database> <script.sql>` | Runs a SQL script on a copy of a database, and leaves the database as it was |
 | `postgrest <database>` | Serves a database to supabase-js clients (a PostgREST subset) |
@@ -132,16 +143,19 @@ Options of the REST server: `-p, --port <number>` (default 4783; 0 = any free po
 
 ## Local DB Studio
 
-`npx local-db-sandbox studio <database>` opens a page in your browser that looks into a sandbox database. It is a local tool for the sandbox's own databases, not a client for a database server.
+`npx local-db-sandbox studio [database]` opens a page in your browser that looks into a sandbox database. It is a local tool for the sandbox's own databases, not a client for a database server.
 
 - **Overview**: the database's path and format, whether Studio has it to itself or is attached to a running sandbox, whether it can be changed, and how many tables it has.
 - **Rows**: tables with row counts, columns with their types, keys, and defaults; rows by page, sorted and filtered; add, edit, and delete rows.
 - **SQL**: `SELECT`, `INSERT`, `UPDATE`, and `DELETE`. Statements that change data run only with **Allow changes**, after a confirmation, as one transaction.
 - **API**: sends one HTTP request at a time to your API on this machine (`127.0.0.1`, `localhost`, or `[::1]` only), and shows the status, duration, headers, and body.
+- **Export**: chosen tables as a PostgreSQL script (`.sql`): schema only, data only, or both, in one transaction; an export with data asks you to confirm.
+- **Clear data**: deletes every row of chosen tables, in one transaction, after a confirmation; the tables and their definitions stay. Refused when a table you did not choose refers to one you did.
+- **ER Diagram**: every table with its columns, types, keys, and NULL, and every foreign key from column to column; zoom, pan, fit to view, search, and tables you can drag. Read-only, and made without reading a row.
 - **Attaches to a running sandbox** (`npm run sandbox`, `postgrest`): one runtime and one writer, so what the application writes, Studio shows, and what you change in Studio, the application reads. It finds the sandbox again after a hot reload.
 - **Local only**: the page is served on `127.0.0.1`, and answers only with the random key in the address the command prints. `--read-only` changes nothing.
 
-Studio does not edit schemas or migrations, and does not start your application. Details: [Reference, Local DB Studio](https://github.com/PatrickCOC/local-db-sandbox/blob/main/docs/REFERENCE.md#local-db-studio-experimental).
+Studio does not edit schemas or migrations, does not start your application, and connects to no database server. Details: [Reference, Local DB Studio](https://github.com/PatrickCOC/local-db-sandbox/blob/main/docs/REFERENCE.md#local-db-studio-experimental).
 
 ## Documentation
 
@@ -152,6 +166,7 @@ Studio does not edit schemas or migrations, and does not start your application.
 | [Compatibility](https://github.com/PatrickCOC/local-db-sandbox/blob/main/docs/COMPATIBILITY.md) | exactly what the SQLite runtime, the importers, the PostgREST subset, Studio, and the generator do |
 | [Architecture](https://github.com/PatrickCOC/local-db-sandbox/blob/main/docs/ARCHITECTURE.md) | the packages and their boundaries |
 | [Format](https://github.com/PatrickCOC/local-db-sandbox/blob/main/docs/FORMAT.md) | the storage format of a database file and a database directory |
+| [Third-party notices](https://github.com/PatrickCOC/local-db-sandbox/blob/main/docs/THIRD_PARTY_NOTICES.md) | the licenses of the runtime dependencies |
 
 ## Known limitations
 
@@ -160,7 +175,8 @@ Studio does not edit schemas or migrations, and does not start your application.
 - **NestJS + TypeORM.** The default data source, set up with `TypeOrmModule.forRoot` / `forRootAsync`, and an entry point that calls `NestFactory.create` and `app.listen` itself. Many-to-many join tables, embedded columns, views, and table inheritance get no tables; unique constraints and indexes of entities are not created.
 - **PostgREST is a subset**: `select`, the filters `eq`, `gte`, `lt`, `range`, `single()`, `maybeSingle()`, `upsert()` on the primary key, and `delete()` with filters. Anything else is refused, never ignored. No Row Level Security, Auth, Storage, Realtime, or RPC.
 - **`simulate` keeps** rows, tables made and dropped, and columns added and dropped. Indexes, views, triggers, renames, CHECK constraints, and type names such as `serial` or `timestamptz` fail their statement.
-- **`generate-migration` writes PostgreSQL**, and never runs it. No command of this package changes a real database or connects to one.
+- **`generate-migration` writes PostgreSQL**, and never runs it. No command of this package changes a real database. `init-pg` connects to one to read its catalog, read-only, and copies no rows.
+- **`init-pg` reads a schema, not a database**: views, partitions, row level security, triggers, and extension tables are left out (and listed), tables lose their schema names (two schemas with the same table name are refused), and the new database is empty. Targets PostgreSQL 12 and later; tested only on PostgreSQL 18.6.
 - **One writer per database.** A second process that would write a database that one has open is refused. Studio attaches to a running sandbox instead; while Studio has a database to itself, a sandbox is refused (stop Studio, start the sandbox, start Studio again).
 - **This machine only.** Studio and the NestJS sandbox listen on `127.0.0.1`, and the REST and PostgREST servers do so unless given `--host`. An application that switches in `SandboxModule` itself listens where its own `app.listen` says.
 - **Windows.** A process that is stopped by force leaves its owner record (`<database>.owner.json`) behind; the next process takes it over.
@@ -179,4 +195,4 @@ npm test
 
 ## License
 
-[MIT](LICENSE)
+MIT; see [LICENSE](LICENSE). The licenses of the runtime dependencies are in the [third-party notices](https://github.com/PatrickCOC/local-db-sandbox/blob/main/docs/THIRD_PARTY_NOTICES.md).

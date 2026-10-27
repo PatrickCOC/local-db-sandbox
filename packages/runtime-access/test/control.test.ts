@@ -208,8 +208,8 @@ describe("the control of a runtime", () => {
   describe("what goes through it", () => {
     it("is every operation of the access, carried out as the access itself carries it out", async () => {
       const { client, access, storage } = await serve();
-      assert.deepEqual([...ACCESS_OPERATIONS], ["info", "schema", "browse", "row", "insert", "update", "delete", "sql", "events"]);
-      assert.deepEqual([...WRITE_OPERATIONS], ["insert", "update", "delete"]);
+      assert.deepEqual([...ACCESS_OPERATIONS], ["info", "schema", "browse", "row", "insert", "update", "delete", "sql", "events", "snapshot", "clear"]);
+      assert.deepEqual([...WRITE_OPERATIONS], ["insert", "update", "delete", "clear"]);
       assert.deepEqual(await client.info(), await access.info());
       assert.deepEqual(await client.schema(), await access.schema());
       const page = { table: "users", limit: 3, offset: 1, orderBy: [{ column: "id", direction: "desc" as const }], filters: [{ column: "role", op: "eq" as const, value: "reader" }] };
@@ -233,6 +233,14 @@ describe("the control of a runtime", () => {
       assert.deepEqual([events, last], [(await access.events()).events, (await access.events()).last]);
       assert.ok(last > 10 && events.every((event) => event.requestId === "studio"));
       assert.deepEqual(await client.events({ after: last }), { events: [], last });
+      // A snapshot, whole, as the access gives it: definitions, and rows when asked for.
+      const snapshot = await client.snapshot({ tables: ["users", "notes"], rows: true });
+      assert.deepEqual(snapshot, await access.snapshot({ tables: ["users", "notes"], rows: true }));
+      assert.deepEqual([snapshot.schema.tables.map((table) => table.name), snapshot.rows?.users?.length, snapshot.rows?.notes?.length], [["users", "notes"], 25, 3]);
+      assert.equal((await client.snapshot({ tables: ["notes"], rows: false })).rows, undefined);
+      // Rows cleared through the control are cleared in the owner's runtime, and saved there.
+      assert.deepEqual(await client.clear({ tables: ["notes"] }), { tables: [{ table: "notes", rows: 3 }], rows: 3 });
+      assert.deepEqual(storage.rows("notes"), []);
     });
 
     it("is a refusal of the access as the access gives it: its code, its words, and a status for its kind", async () => {

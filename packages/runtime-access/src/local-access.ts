@@ -1,10 +1,15 @@
 import { SandboxLimitError } from "../../core/src/index.ts";
-import { RuntimeSchemaError, SandboxDialectUnsupportedError, SandboxParameterError, SandboxReadOnlyError, describeSql, exactInteger, formatCanonicalType, fromStoredValue, leadingKeyword, toStoredValue } from "../../runtime/src/index.ts";
-import type { ColumnSchema, Condition, ExecuteOptions, ExecuteResult, RelationalRuntime, SqlEvent, SqlEventContext, SqlValue, TableSchema } from "../../runtime/src/index.ts";
+import type { Row } from "../../core/src/index.ts";
+import { RuntimeSchemaError, SandboxDialectUnsupportedError, SandboxParameterError, SandboxReadOnlyError, describeSql, exactInteger, formatCanonicalType, fromStoredValue, leadingKeyword, quoteIdentifier, toStoredValue } from "../../runtime/src/index.ts";
+import type { ColumnSchema, Condition, EnumType, ExecuteOptions, ExecuteResult, RelationalRuntime, SqlEvent, SqlEventContext, SqlValue, TableSchema } from "../../runtime/src/index.ts";
 import { hasSql, splitStatements } from "../../sql-console/src/index.ts";
 import type { DatabaseFormat, OwnerKind } from "../../storage-json/src/index.ts";
 import { ACCESS_PROTOCOL, AccessError, DEFAULT_ACCESS_LIMITS, assertMadeFor } from "./access.ts";
 import type {
+  ClearRequest,
+  ClearResult,
+  SnapshotRequest,
+  SnapshotResult,
   AccessEvent,
   AccessInfo,
   AccessLimits,
@@ -366,6 +371,123 @@ export class LocalRuntimeAccess implements RuntimeAccess {
         rows: Number(this.#runtime.run({ kind: "count", table: table.name }, { readOnly: true, context: next() }).rows[0]?.count ?? 0),
       })),
     };
+  }
+
+  async snapshot(request: SnapshotRequest, options?: RequestOptions): Promise<SnapshotResult> {
+    this.#for(options);
+    const names: unknown = request?.tables;
+    if (!Array.isArray(names) || names.length === 0 || new Set(names).size !== names.length) {
+      throw new AccessError("INVALID_REQUEST", '"tables" must name at least one table, each once.');
+    }
+    if (typeof request.rows !== "boolean") {
+      throw new AccessError("INVALID_REQUEST", '"rows" must say, true or false, whether the rows are asked for.');
+    }
+    names.forEach((name) => this.#table(name));
+    this.#idle();
+    // Read at one moment: nothing below waits, so no statement of the application comes between two tables.
+    const wanted = new Set(names as string[]);
+    const tables = this.#runtime.schema.filter((table) => wanted.has(table.name)).map((table) => structuredClone(table));
+    // The enumerated types are the schema's; a column carries the name and the values of its own, which is all a type is.
+    const enums = new Map<string, EnumType>();
+    for (const column of tables.flatMap((table) => table.columns)) {
+      if (column.enum !== undefined && !enums.has(column.enum.name)) {
+        enums.set(column.enum.name, { name: column.enum.name, values: [...column.enum.values] });
+      }
+    }
+    const result: SnapshotResult = { schema: { tables, types: { enums: [...enums.values()] } } };
+    let bytes = Buffer.byteLength(JSON.stringify(result.schema));
+    if (request.rows) {
+      const { collections } = this.#runtime.snapshot([...wanted]);
+      const rows: Record<string, Row[]> = {};
+      for (const table of tables) {
+        rows[table.name] = collections[table.name] ?? [];
+        bytes += Buffer.byteLength(JSON.stringify(rows[table.name]));
+        if (bytes > this.#limits.maxSnapshotBytes) {
+          throw new AccessError(
+            "LIMIT_EXCEEDED",
+            `The tables asked for, with their rows, are more than ${this.#limits.maxSnapshotBytes} bytes, which is what one snapshot may hold. Nothing was given: ask for fewer tables, or for their definitions alone.`,
+          );
+        }
+      }
+      result.rows = rows;
+    }
+    if (bytes > this.#limits.maxSnapshotBytes) {
+      throw new AccessError("LIMIT_EXCEEDED", `The definitions of the tables asked for are more than ${this.#limits.maxSnapshotBytes} bytes, which is what one snapshot may hold.`);
+    }
+    return result;
+  }
+
+  /**
+   * Deletes every row of the tables named, in one transaction (D-051). The
+   * tables stay as they are: columns, keys, constraints, indexes, and the
+   * numbering, which goes on after the last number it gave.
+   *
+   * Nothing outside the tables named is changed. A table that is not named
+   * and has rows that refer to one that is would lose them, or have them
+   * changed, by its foreign key's action, or be left referring to nothing:
+   * such a request is refused, naming the tables, before anything is done.
+   * Among the tables named, foreign keys are checked when the transaction
+   * commits (SQLite's `defer_foreign_keys`, which ends with the transaction),
+   * so that tables that refer to one another in a circle are cleared too; the
+   * runtime's foreign keys are never switched off.
+   */
+  async clear(request: ClearRequest, options?: RequestOptions): Promise<ClearResult> {
+    this.#for(options);
+    this.#writable();
+    const names: unknown = request?.tables;
+    if (!Array.isArray(names) || names.length === 0 || new Set(names).size !== names.length) {
+      throw new AccessError("INVALID_REQUEST", '"tables" must name at least one table, each once.');
+    }
+    names.forEach((name) => this.#table(name));
+    this.#idle();
+    const chosen = new Set(names as string[]);
+    const tables = this.#runtime.schema.filter((table) => chosen.has(table.name));
+    const next = this.#statements();
+    const countOf = (table: string, where?: string): number =>
+      Number(this.#runtime.execute(`SELECT COUNT(*) AS n FROM ${quoteIdentifier(table)}${where === undefined ? "" : ` WHERE ${where}`}`, [], { readOnly: true, context: next() }).rows[0]?.n ?? 0);
+
+    // Rows of tables that are not named, which refer to tables that are: these would be changed or left dangling.
+    const referring: string[] = [];
+    for (const table of this.#runtime.schema.filter((candidate) => !chosen.has(candidate.name))) {
+      const keys = [
+        ...table.columns.filter((column) => column.references !== undefined).map((column) => ({ columns: [column.name], target: column.references?.table as string })),
+        ...(table.foreignKeys ?? []).map((key) => ({ columns: key.columns, target: key.references.table })),
+      ].filter((key) => chosen.has(key.target));
+      for (const key of keys) {
+        // A foreign key holds a row only when none of its columns is NULL.
+        const rows = countOf(table.name, key.columns.map((column) => `${quoteIdentifier(column)} IS NOT NULL`).join(" AND "));
+        if (rows > 0) {
+          referring.push(`${rows} row${rows === 1 ? "" : "s"} of "${table.name}" (${key.columns.join(", ")}) refer${rows === 1 ? "s" : ""} to "${key.target}"`);
+        }
+      }
+    }
+    if (referring.length > 0) {
+      throw new AccessError(
+        "CONSTRAINT",
+        `Nothing was cleared: ${referring.join("; ")}, which ${referring.length === 1 ? "is" : "are"} not chosen. Clearing would delete or change those rows by their foreign key, or leave them referring to nothing. Choose those tables too, or clear them first.`,
+      );
+    }
+
+    const counts = tables.map((table) => ({ table: table.name, rows: countOf(table.name) }));
+    const rollback = (): void => {
+      if (this.#runtime.inTransaction) {
+        this.#runtime.execute("ROLLBACK", [], { context: next() });
+      }
+    };
+    this.#runtime.execute("BEGIN", [], { context: next() });
+    try {
+      // For this transaction alone: the foreign keys among the tables named are checked at its end, not statement by statement.
+      this.#runtime.execute("PRAGMA defer_foreign_keys = ON", [], { context: next() });
+      for (const table of tables) {
+        this.#runtime.execute(`DELETE FROM ${quoteIdentifier(table.name)}`, [], { context: next() });
+      }
+      this.#runtime.execute("COMMIT", [], { context: next() });
+    } catch (error) {
+      // A statement failed, or what was changed could not be saved: nothing of it stays.
+      rollback();
+      throw this.#failure(error, true);
+    }
+    return { tables: counts, rows: counts.reduce((sum, entry) => sum + entry.rows, 0) };
   }
 
   async browse(request: BrowseRequest, options?: RequestOptions): Promise<BrowseResult> {

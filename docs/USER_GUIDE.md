@@ -1,6 +1,6 @@
 # Local DB Sandbox 使用指南
 
-適用版本：`local-db-sandbox` 0.1.0（V1 Developer Preview）。本指南的每個指令都對照過目前實作的 `--help`，並在合成（synthetic）範例專案上實際執行過。輸出範例節錄自實際執行：很長的本機路徑縮短成 `...`，環境變數名稱換成範例設定裡的名稱；你看到的路徑、pid、時間與金鑰會不同。
+適用版本：`local-db-sandbox` 0.2.0-beta.1（v0.2.0：`init-pg`、Studio 的 Export、Clear data 與 ER Diagram 分頁）。本指南的每個指令都對照過目前實作的 `--help`，並在合成（synthetic）範例專案上實際執行過。輸出範例節錄自實際執行：很長的本機路徑縮短成 `...`，環境變數名稱換成範例設定裡的名稱；你看到的路徑、pid、時間與金鑰會不同。
 
 每個指令、選項與檔案格式的完整英文說明在 [REFERENCE.md](REFERENCE.md)；SQLite runtime 的精確行為在 [COMPATIBILITY.md](COMPATIBILITY.md)。指令本身的說明：`npx local-db-sandbox <command> --help`。
 
@@ -23,13 +23,13 @@
 
 Local DB Sandbox 在你自己的電腦上，替專案做一個**可以丟棄的本機資料庫**：
 
-- 從專案的 schema 建立本機資料庫：PostgreSQL migrations（`init`）或 NestJS + TypeORM entities（`init-nest`）。
+- 從專案的 schema 建立本機資料庫：PostgreSQL migrations（`init`）、NestJS + TypeORM entities（`init-nest`），或直接讀取執行中 PostgreSQL 資料庫的 schema（`init-pg`）。
 - 讓專案自己的後端跑在這個資料庫上（`npm run sandbox`），或用 PostgREST 子集服務 supabase-js 應用程式（`postgrest`）。
 - 用瀏覽器看、改資料，並對本機 API 送出請求（Local DB Studio）。
 - 在資料庫的**副本**上試跑 SQL script（`simulate`）。
 - 比較兩份 schema，並產生 PostgreSQL migration（`diff-schema`、`plan-migration`、`generate-migration`）。
 
-除了「把 JSON 檔當成 mock REST API」的模式（使用自己的 JSON engine）之外，底層都是 SQLite（Node 內建的 `node:sqlite`）。它是開發工具，不會連線到任何資料庫伺服器，也不會修改真正的資料庫。
+除了「把 JSON 檔當成 mock REST API」的模式（使用自己的 JSON engine）之外，底層都是 SQLite（Node 內建的 `node:sqlite`）。它是開發工具，不會修改真正的資料庫。唯一會連線到資料庫伺服器的指令是 `init-pg`：它只在 read-only transaction 裡讀取 PostgreSQL 的 system catalog，不讀任何資料列。
 
 ### 先備條件
 
@@ -45,11 +45,11 @@ ExperimentalWarning: SQLite is an experimental feature and might change at any t
 
 ### 安裝
 
-套件已發佈到 npm，目前版本是 beta `0.1.0-beta.1`（dist-tags `beta` 與 `latest`）。在你的專案安裝：
+套件發佈在 npm，本指南對應的版本是 beta `0.2.0-beta.1`，以 `beta` tag 安裝。在你的專案安裝：
 
 ```sh
 npm install --save-dev local-db-sandbox@beta
-npx local-db-sandbox --version          # 0.1.0-beta.1
+npx local-db-sandbox --version          # 0.2.0-beta.1
 ```
 
 也可以從原始碼自行打包成 tarball 再安裝：
@@ -127,8 +127,10 @@ migrations 用 PostgreSQL 自己的 parser 讀取並依序套用。Row level sec
 **步驟 2：用 Studio 看資料**
 
 ```sh
-npx local-db-sandbox studio .local-db-sandbox/sandbox.db
+npx local-db-sandbox studio          # 在專案裡不用寫路徑：會自動找到 .local-db-sandbox/sandbox.db
 ```
+
+`init` 結束時會印出「Next steps:」，列出下一步可以直接複製的指令；路徑一律用 `/`，在 Git Bash、cmd、PowerShell 都能直接貼上。不給參數的 `init` 等於 `init .`（讀取目前的資料夾）。
 
 打開它印出的網址（見 [第 2 節](#2-local-db-studio)）。
 
@@ -239,8 +241,10 @@ Local DB Sandbox: application running at http://127.0.0.1:3001
 **步驟 4：開 Studio（另一個終端機）**
 
 ```sh
-npx local-db-sandbox studio sandbox.db --api http://127.0.0.1:3001/
+npx local-db-sandbox studio
 ```
+
+在專案資料夾（或其子資料夾）裡不用寫路徑：Studio 會依 `.local-db-sandbox/sandbox.config.json` 找到 `sandbox.db`，API 分頁也會預設成 sandbox 的位址（`http://127.0.0.1:3001/`）。開頭會印出 `Opening sandbox.db (from .local-db-sandbox/sandbox.config.json).`。若專案同時有 `sandbox.db` 與 `.local-db-sandbox/sandbox.db`，Studio 會列出兩者並要求你指定一個。原本寫法 `npx local-db-sandbox studio sandbox.db --api http://127.0.0.1:3001/` 仍然有效。
 
 ```text
 Local DB Studio at http://127.0.0.1:4583/#key=3f9c...
@@ -255,24 +259,85 @@ Local DB Studio at http://127.0.0.1:4583/#key=3f9c...
 
 **之後新增或修改 entity**：先 `npx local-db-sandbox diff-schema sandbox.db .` 看差異，然後**先停掉 `npm run sandbox` 與 Studio**，再執行 `npx local-db-sandbox init-nest`（既有資料保留）。`init-nest` 寫入既有資料庫時不會檢查有沒有其他 process 正在使用它，所以要自己先停掉。
 
-**建議加入 `.gitignore`**：
+**`.gitignore` 會自動處理**：`init`、`init-pg`、`init-nest` 成功後，會把它們產生的路徑加到專案 Git repository 根目錄的 `.gitignore`，並印出加了哪些規則：
 
 ```text
-*.owner.json
-*-preview.db/
+# Local DB Sandbox: local databases and runtime files (added by local-db-sandbox)
+/sandbox.db/
+/sandbox.db.owner.json
+/sandbox.db.owner.lock
+/sandbox-preview.db/
 ```
 
-`*.owner.json` 是執行中 process 的擁有者紀錄（含本機 token），不該 commit；`*-preview.db/` 是 `simulate` 的拋棄式副本。
+- 只加入工具自己產生的路徑：資料庫、`*.owner.json`／`*.owner.lock`（執行中 process 的擁有者紀錄，含本機 token）、`simulate` 的 `*-preview.db`，以及 `init`／`init-pg` 的 report。每條規則都從 repository 根目錄寫起，不會影響其他 `.db`、`.json`、`.sql` 檔。
+- `sandbox.config.json`、`sandbox.server.ts` **不會**被忽略，團隊可以共用。
+- 原有的內容（註解、規則、換行格式）完全保留，規則不會重複加入；你自己的規則已經涵蓋時也不會再加。
+- 專案不在 Git repository 裡、資料庫在 repository 外、指令失敗，或加了 `--no-gitignore` 時，都不會修改 `.gitignore`，並會說明原因。
+- 若這些檔案已經被 Git 追蹤，只會提示 `git rm -r --cached <路徑>`，不會替你移除。
 
 ### 1.3 各指令的產出一覽
 
 | 指令 | 寫入什麼、在哪裡 |
 |---|---|
-| `init .` | `.local-db-sandbox/sandbox.db/`、`.local-db-sandbox/sandbox.db.report.json` |
-| `init-nest` | `sandbox.db/`、`.local-db-sandbox/sandbox.config.json`、`.local-db-sandbox/sandbox.server.ts`、`package.json` 的 `"sandbox"` script |
+| `init .` | `.local-db-sandbox/sandbox.db/`、`.local-db-sandbox/sandbox.db.report.json`；Git 專案的 `.gitignore`（`--no-gitignore` 可關閉） |
+| `init-nest` | `sandbox.db/`、`.local-db-sandbox/sandbox.config.json`、`.local-db-sandbox/sandbox.server.ts`、`package.json` 的 `"sandbox"` script；Git 專案的 `.gitignore` |
+| `init-pg <url>` | `.local-db-sandbox/sandbox.db/`、`.local-db-sandbox/sandbox.db.report.json`（在目前目錄；PostgreSQL 端什麼都不寫）；Git 專案的 `.gitignore` |
 | `simulate <db> <script>` | `<名稱>-preview.db/`，在原資料庫旁邊（例如 `sandbox.db` → `sandbox-preview.db`） |
 | `generate-migration ... --out <file>` | 你指定的 SQL 檔（已存在的檔案絕不覆蓋） |
 | 任何正在寫入資料庫的 process | `<資料庫>.owner.json`，結束時自動刪除 |
+
+### 1.4 從執行中的 PostgreSQL 資料庫建立（init-pg）
+
+專案同時有 entities 和 migrations、或 migration 歷史不完整時，最可靠的 schema 來源可能是資料庫本身。`init-pg` 直接讀取執行中 PostgreSQL 的 schema，建立一個**沒有資料列**的本機資料庫。不需要 migration，也不需要 TypeORM。
+
+**1. 準備一個 read-only 角色（建議）。** 它只需要能連線到資料庫、能使用（`USAGE`）要讀的 schema；`USAGE` 不會給它讀任何資料列的權限：
+
+```sql
+CREATE ROLE sandbox_reader LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE app TO sandbox_reader;
+GRANT USAGE ON SCHEMA public TO sandbox_reader;   -- public 預設所有角色都有
+```
+
+**2. 讀取 schema。** 密碼放在 `PGPASSWORD` 環境變數裡（不要寫在 URL，shell 可能會把它留在歷史紀錄）：
+
+```sh
+# Git Bash / macOS / Linux
+PGPASSWORD='...' npx local-db-sandbox init-pg postgresql://sandbox_reader@127.0.0.1:5432/app
+```
+
+```powershell
+# PowerShell
+$env:PGPASSWORD = '...'; npx local-db-sandbox init-pg postgresql://sandbox_reader@127.0.0.1:5432/app
+```
+
+輸出會列出讀到的 tables、建立的資料庫，以及哪些東西「只保留為資訊」、「本機不重現」或「不支援」。完整報告寫在 `.local-db-sandbox/sandbox.db.report.json`（只有 host、port、資料庫名稱和使用者，**沒有密碼**）。
+
+**3. 用 Studio 看、改資料：**
+
+```sh
+npx local-db-sandbox studio .local-db-sandbox/sandbox.db
+```
+
+常用選項：
+
+| 選項 | 作用 |
+|---|---|
+| `--schema <名稱>`（`-s`） | 讀取 `public` 以外的 schema；可以重複指定多個 |
+| `--out <目錄>` | 建立到別的位置，例如 `--out billing.db` |
+| `--force` | 取代已存在的資料庫（裡面的資料列會消失）；掃描失敗時原資料庫不會被動到 |
+| `--strict` | 只要有不支援的部分（例如 exclusion constraint）就不寫入 |
+| `--connect-timeout <秒>`、`--query-timeout <秒>` | 連線與每個 catalog query 的時間上限（預設 10 秒、30 秒） |
+
+要知道的事：
+
+- **只讀 catalog。** 所有查詢都是對 `pg_catalog` 的 `SELECT`，在一個 `READ ONLY` transaction 裡執行，最後 rollback。不讀任何 table 的資料列，不在 PostgreSQL 上執行 DDL、DML 或 migration。
+- **為什麼不用 `information_schema`：** 它會依權限隱藏資訊，例如沒有 table 權限的角色看不到那個 table 的 constraints；用它的話，read-only 角色會讀到「沒有 key 的 table」而且不會有任何警告。`pg_catalog` 不會這樣。
+- **只有一個 namespace。** 本機資料庫沒有 schema 的概念，table 名稱不含 schema。同時讀多個 schema 時，如果有同名的 table、index 或 enum type，指令會拒絕並列出所有衝突；請一次讀一個 schema，各自建立資料庫。
+- **會列出、但不重現：** view、materialized view、foreign table、partition（partitioned table 會建成一個普通 table）、row level security、trigger、extension 自己的 table、指向未讀取 schema 的 foreign key、未讀取 schema 的型別。PostgreSQL 自己的 schema（`pg_catalog`、`information_schema`）一律不讀。
+- **錯誤訊息不會出現連線字串或密碼。** 連不上、密碼錯誤、權限不足、逾時，都會說明原因並且不寫入任何東西。
+- 支援目標是 PostgreSQL 12 以上；**實際測試過的只有 PostgreSQL 18.6**（原生 server 與 PGlite）。12 到 17 尚未測試，不保證可用。
+- `sslmode=require` 遇到沒有 TLS 的 server 時，會直接說明「server 不提供 TLS」而失敗；本機 server 請用 `sslmode=prefer`（預設）或 `disable`。
+- 來源資料庫的 schema 之後改了，請用 `init-pg --force` 重新建立。
 
 ---
 
@@ -358,6 +423,73 @@ Studio 依資料庫的狀態自動決定模式，啟動時的 `mode:` 一行與�
 - 請求的網址、headers、body 與回應都不會被記錄、寫檔或保存；API 設定的 cookie 只顯示名稱、不顯示值。
 - 2xx 不代表業務邏輯正確：請自己看回應，再到 Rows 或 SQL 確認資料庫的變化。
 
+### 2.5a Export 分頁：匯出成 PostgreSQL 的 SQL
+
+Export 分頁把你選的 tables 寫成一份 PostgreSQL 可以重建的 `.sql` 檔：
+
+1. 勾選 tables（可以單選、多選，或按 **All** / **None**）。
+2. 選擇內容：**Schema only**（預設）、**Data only**、或 **Schema + data**。下方會顯示「N tables · 模式」。
+3. 包含資料的模式需要再勾選確認：檔案會含有這些 tables 的資料列，可能包括你自己輸入的資料。
+4. 按 **Export .sql**，瀏覽器會下載 `local-db-export-<模式>-<時間>.sql`；結果下方也有「Download ... again」連結。
+
+載入到一個空的 PostgreSQL 資料庫：
+
+```sh
+psql -v ON_ERROR_STOP=1 -d my_empty_db -f local-db-export-schema-and-data-20261026T081503Z.sql
+```
+
+要知道的事：
+
+- **只讀取本機 sandbox，不修改任何資料，也不連線到任何資料庫。** Attached 模式下讀取的是正在執行的 sandbox；`--read-only` 的 Studio 也可以匯出。
+- **整份 script 是一個 transaction**：任何一個 statement 失敗，什麼都不會留下。最後一行會寫出 statement 數量，用來判斷檔案是否完整。
+- **Schema + data**：先建 tables、再放資料，最後才加 foreign keys，所以互相參照或參照自己的 tables 也能載入。**Data only** 要載入到已經有這些（空的）tables 的資料庫；有循環參照時，檔案會提示需要 DEFERRABLE 的 foreign keys。
+- **沒有選到的 table 的 foreign key 不會寫出**，並且會在檔案和頁面上提示。
+- **無法正確寫出的內容會讓整個匯出被拒絕**（例如型別不明的欄位、不符合欄位型別的值），頁面列出所有原因，不會產生檔案。
+- **上限**：選取的 tables 連同資料最多 32 MiB（JSON），script 最多 64 MiB；超過就拒絕，請少選幾個 tables 或只匯出 schema。
+- 檔名和內容都不含資料庫路徑、連線字串、密碼或 token。但檔案裡的資料列可能是個人資料，請妥善保管。
+- 實際測試過的是 PostgreSQL 18.6；其他版本是支援目標，尚未測試。
+
+### 2.5b Clear data 分頁：清空 tables 的資料列
+
+要重新測試時，可以清空選定 tables 的所有資料列，保留 tables、欄位、keys、constraints、indexes 與 schema，不會刪除資料庫：
+
+1. 勾選要清空的 tables（單選、多選，或 **All** / **None**），下方顯示「N tables · M rows to delete」。
+2. 勾選「I understand that the rows deleted cannot be restored.」，按鈕才會啟用。
+3. 按 **Clear data…**，對話框會列出 tables 與資料列數；按 **Delete the rows** 才會執行。
+4. 完成後 Rows 與 table 清單會重新讀取；確認方塊會取消勾選，下次需要再勾。
+
+要知道的事：
+
+- **單一 transaction**：選定的 tables 要嘛全部清空，要嘛一個都不動；刪除或存檔失敗都會整個 rollback。
+- **Foreign key**：選定的 tables 之間（包括互相參照或參照自己）會一起清空，FK 在 transaction 結束時檢查。**若沒有選到的 table 有資料列參照被選定的 table，會拒絕並列出是哪些 tables**：否則那些資料列會被 cascade 刪除、被改成 NULL，或指向不存在的資料。請把它們一起選上，或先清空它們。不會關閉 FK 檢查，也不會動到你沒選的資料。
+- **自動編號不重設**：資料庫開著的期間，新資料列會接著上次的編號；資料庫重新開啟後（重新啟動 Studio 或 sandbox），空的 table 會從 1 開始，因為存檔只保存資料列、不保存計數器。
+- **無法復原**：需要保留的資料，請先用 Export（Data only 或 Schema + data）匯出，或在沒有 process 開著資料庫時複製整個資料庫資料夾。
+- Attached 模式下，是透過 sandbox 的 runtime 清空，不會直接改檔案；`--read-only` 的 Studio、single-file 資料庫不能清空。
+
+### 2.5c ER Diagram 分頁：查看 tables 與 foreign keys
+
+ER Diagram 分頁把資料庫的 tables 畫成圖：每個 table 是一個方塊，列出欄位名稱、型別、`PK` / `FK` 標記，以及 `null` / `not null`；foreign key 以線條從參照的欄位連到被參照的欄位（箭頭在被參照的一端）。右上角顯示 tables 與 foreign keys 的數量。
+
+操作：
+
+- **縮放**：按 **Zoom in** / **Zoom out**，或在圖上滾動滑鼠滾輪（以游標位置為中心）。
+- **平移**：拖曳空白處。
+- **Fit to view**：讓所有 tables 都在畫面內；第一次打開分頁時也會自動這樣做。
+- **搜尋**：在「Find a table」輸入 table 名稱的一部分（不分大小寫），點選結果（或按 Enter 選第一個），該 table 會移到畫面中央並加上框線，它的 foreign key 線條也會一起標示。
+- **點一下 table**：標示它的 foreign keys；再點一次取消。
+- **拖曳 table**：調整目前畫面的排列。位置不會保存，也不會修改 schema；按 **Auto arrange** 回到自動排列。
+
+要知道的事：
+
+- **只讀 schema**：圖是從 table 定義產生的，不讀取任何資料列，也不修改資料庫。Standalone、attached、`--read-only` 的 Studio 都可以使用。
+- **多欄位（composite）foreign key** 的每一組欄位配對各畫一條線；參照自己的 table 會從方塊右側繞回來；互相參照（循環）的 tables 照實畫出。
+- 沒有 foreign key 的 tables 也會顯示，依名稱排在一起。
+- 只有宣告為 foreign key 的關聯才會出現；ORM 的 relation 如果沒有建立 foreign key，不會顯示。參照到資料庫中不存在的 table 的 foreign key 不會畫出，會在圖上方列出。
+- 名稱超過 40 個字元寬（中文與 emoji 算 2 個）會截短並加上「…」，滑鼠停在上面可以看到完整名稱。
+- **上限**：最多 400 個 tables、8,000 個欄位；超過時分頁會說明，請改用 Rows 或 Export 分頁逐一查看。50–100 個 tables 可以正常操作。
+- 目前不能匯出成 PNG / SVG。
+- table 定義改變後（例如 sandbox 重新啟動、schema 不同了），切回這個分頁會重新產生圖；只有資料列數改變時不會重新排列。
+
 ### 2.6 讓 Studio 連上執行中的 sandbox API
 
 **NestJS 專案**（實際驗證過的流程）：
@@ -432,11 +564,11 @@ DatabaseOwnedError: .../sandbox.db is open in Local DB Studio (pid 20320, since 
   ```
 
   旁邊的 `<資料庫>.owner.json` 不是資料庫的一部分，不需要複製。
-- **SQL Export 是規劃中的功能，V1 沒有。** 目前無法把 table 定義或資料列匯出成 `.sql` script。
-- **直接掃描 PostgreSQL 資料庫的 schema 是規劃中的功能，V1 沒有。** V1 的任何指令都不會連線到資料庫伺服器。
-- **目前支援的 schema 來源仍然是** TypeORM entities（`init-nest`）與支援的 PostgreSQL migration 檔（`init`）。migration 歷史不完整（例如最早建立 table 的 migration 不在專案裡）時，`init` 會在第一個失敗的 statement 停止，而且不寫入任何東西。
+- **要把 table 定義或資料列帶到別的地方：** 用 Studio 的 Export 分頁匯出成 PostgreSQL 的 `.sql`（見 2.5a）。
+- **直接讀取執行中 PostgreSQL 的 schema：** 用 `init-pg`（見 1.4）。
+- **目前支援的 schema 來源是** TypeORM entities（`init-nest`）、支援的 PostgreSQL migration 檔（`init`），以及執行中 PostgreSQL 的 catalog（`init-pg`）。migration 歷史不完整（例如最早建立 table 的 migration 不在專案裡）時，`init` 會在第一個失敗的 statement 停止，而且不寫入任何東西。
 
-上面標示為規劃中的項目尚未實作。
+v0.2.0 的新功能都已實作，並寫在本指南裡：`init-pg`（1.4）、Export 分頁（2.5a）、Clear data 分頁（2.5b）、ER Diagram 分頁（2.5c），以及每個 init 指令最後的 Next steps 與 `.gitignore` 管理。
 
 ---
 

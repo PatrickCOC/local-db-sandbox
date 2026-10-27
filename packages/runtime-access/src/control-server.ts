@@ -52,7 +52,12 @@ function refusal(error: AccessError): AccessAnswer {
  * changed is always said. The access has bounded such an answer itself,
  * before anything was committed.
  */
-export async function answerAccessRequest(access: RuntimeAccess, operation: string, body: string | undefined, limits: Pick<AccessLimits, "maxRequestBytes" | "maxResponseBytes">): Promise<AccessAnswer> {
+export async function answerAccessRequest(
+  access: RuntimeAccess,
+  operation: string,
+  body: string | undefined,
+  limits: Pick<AccessLimits, "maxRequestBytes" | "maxResponseBytes" | "maxSnapshotBytes">,
+): Promise<AccessAnswer> {
   if (!isAccessOperation(operation)) {
     return refusal(new AccessError("NOT_FOUND", `There is no operation ${JSON.stringify(operation)}.`));
   }
@@ -77,8 +82,10 @@ export async function answerAccessRequest(access: RuntimeAccess, operation: stri
     const result = await carryOut(access, operation, envelope.request, envelope.for === undefined ? undefined : { owner: envelope.for });
     const text = JSON.stringify({ result });
     const bytes = Buffer.byteLength(text);
-    if (bytes > limits.maxResponseBytes && !changesData(operation, envelope.request)) {
-      return refusal(new AccessError("LIMIT_EXCEEDED", `The answer has ${bytes} bytes, and an answer may have ${limits.maxResponseBytes}.`));
+    // A snapshot is bounded by an access itself, and gives tables whole or not at all.
+    const most = operation === "snapshot" ? limits.maxSnapshotBytes + 1_048_576 : limits.maxResponseBytes;
+    if (bytes > most && !changesData(operation, envelope.request)) {
+      return refusal(new AccessError("LIMIT_EXCEEDED", `The answer has ${bytes} bytes, and an answer may have ${most}.`));
     }
     return { status: 200, body: text };
   } catch (error) {

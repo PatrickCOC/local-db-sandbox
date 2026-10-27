@@ -511,8 +511,8 @@ export interface RelationalRuntime {
 
   /** Registers a listener for executed statements. Returns a function that removes it. */
   subscribe(listener: SqlEventListener): () => void;
-  /** The current state of the schema's tables, as a fixture. */
-  snapshot(): DatabaseState;
+  /** The current state of the schema's tables, as a fixture; of those named alone, when `tables` is given. */
+  snapshot(tables?: readonly string[]): DatabaseState;
   close(): void;
 }
 

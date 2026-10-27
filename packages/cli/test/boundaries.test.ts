@@ -8,6 +8,7 @@ import { after, before, describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import ts from "typescript";
+import { startDisposablePostgres } from "../../import-postgres/test/support/disposable-postgres.ts";
 import { schemaFile } from "../../storage-json/test/support/database-files.ts";
 import { runCli } from "../src/index.ts";
 
@@ -26,6 +27,9 @@ import { runCli } from "../src/index.ts";
  * - The parser (libpg-query) is imported in one place, on first use, so that
  *   it is loaded when migrations are collected, and when a generated
  *   migration is checked before it is printed, and by nothing else.
+ * - The client of PostgreSQL servers (postgres) is imported in one place too,
+ *   on first use, in packages/import-postgres, so that it is loaded by
+ *   init-pg, which reads a server's catalog, and by nothing else (D-049).
  *
  * The first is read from the sources: what each file imports, followed
  * through. That cannot see a module that is loaded under a name worked out
@@ -119,6 +123,10 @@ const packageOf = (file: string): string => file.split("/")[0] as string;
 const packagesReached = (name: string, running = false): string[] => [...new Set([...reach(sourcesOf(name), running).files].map(packageOf))].sort();
 /** `libpg-query`, or a file of it. */
 const isParser = (name: string): boolean => /^libpg-query(\/|$)/.test(name);
+/** `postgres`, the client of PostgreSQL servers, or a file of it. */
+const isClient = (name: string): boolean => /^postgres(\/|$)/.test(name);
+/** `@dagrejs/dagre`, the layout of Studio's ER diagram, or anything else of `@dagrejs`. */
+const isLayout = (name: string): boolean => /^@dagrejs\//.test(name);
 
 const ALL = readdirSync(PACKAGES, { withFileTypes: true })
   .filter((entry) => entry.isDirectory() && existsSync(join(PACKAGES, entry.name, "src")))
@@ -174,6 +182,7 @@ describe("package boundaries: PostgreSQL knowledge", () => {
       const reached = reach(sourcesOf(name));
       assert.deepEqual([...reached.files].filter((file) => packageOf(file) === "import-postgres"), [], `${name} reaches the PostgreSQL collector`);
       assert.deepEqual([...reached.modules].filter(isParser), [], `${name} reaches the PostgreSQL parser`);
+      assert.deepEqual([...reached.modules].filter(isClient), [], `${name} reaches the PostgreSQL client`);
     }
     assert.ok(packagesReached("cli").includes("import-postgres"));
   });
@@ -279,8 +288,8 @@ describe("package boundaries: Local DB Studio", () => {
     assert.deepEqual([...new Set(direct)].sort(), ["runtime-access", "sql-console", "storage-json", "studio"]);
     for (const file of sourcesOf("studio")) {
       assert.deepEqual(importsOf(file).opaque, [], file);
-      // No framework, and no library: Node, and nothing else.
-      assert.deepEqual(importsOf(file).modules.filter((entry) => !entry.name.startsWith("node:")), [], file);
+      // No framework, and no library: Node, and nothing else; but for the layout of the ER diagram, on first use (D-053, below).
+      assert.deepEqual(importsOf(file).modules.filter((entry) => !entry.name.startsWith("node:") && !(file === "studio/src/diagram.ts" && entry.name === "@dagrejs/dagre" && entry.dynamic)), [], file);
     }
   });
 
@@ -294,6 +303,28 @@ describe("package boundaries: Local DB Studio", () => {
     assert.ok(packagesReached("nest-typeorm").includes("runtime-access"));
     assert.equal(packagesReached("postgrest").includes("runtime-access"), false);
     assert.ok(importsOf("cli/src/postgrest-command.ts").files.some((entry) => entry.file === "runtime-access/src/index.ts"));
+  });
+});
+
+describe("package boundaries: the client of PostgreSQL servers", () => {
+  it("is named by one source file, once, in an import() that runs on first use, in the package that reads PostgreSQL", () => {
+    const naming = ALL.flatMap(sourcesOf).flatMap((file) =>
+      importsOf(file)
+        .modules.filter((entry) => isClient(entry.name))
+        .map((entry) => ({ file, ...entry })),
+    );
+    assert.deepEqual(naming, [{ file: "import-postgres/src/pg-client.ts", name: "postgres", erased: false, dynamic: true }]);
+  });
+});
+
+describe("package boundaries: the layout of the ER diagram", () => {
+  it("is named by one source file, once, in an import() that runs on first use, in Studio (D-053)", () => {
+    const naming = ALL.flatMap(sourcesOf).flatMap((file) =>
+      importsOf(file)
+        .modules.filter((entry) => isLayout(entry.name))
+        .map((entry) => ({ file, ...entry })),
+    );
+    assert.deepEqual(naming, [{ file: "studio/src/diagram.ts", name: "@dagrejs/dagre", erased: false, dynamic: true }]);
   });
 });
 
@@ -345,14 +376,14 @@ for (const step of steps) {
     const sandbox = await library.startPostgrestSandbox({ database: step.serve, port: 0, save: false });
     await sandbox.stop();
   }
-  report.push({ code, parser: resolved.some((url) => url.includes("libpg-query")) });
+  report.push({ code, parser: resolved.some((url) => url.includes("libpg-query")), client: resolved.some((url) => url.includes("/node_modules/postgres/")) });
 }
 console.log(JSON.stringify(report));
 `;
 
     type Step = { cli: string[] } | { serve: string };
 
-    async function probe(steps: Step[]): Promise<{ code: number; parser: boolean }[]> {
+    async function probe(steps: Step[]): Promise<{ code: number; parser: boolean; client: boolean }[]> {
       const script = join(dir, "probe.mjs");
       writeFileSync(script, PROBE);
       const entry = pathToFileURL(join(PACKAGES, "cli/src/index.ts")).href;
@@ -387,6 +418,7 @@ console.log(JSON.stringify(report));
         [{ cli: ["generate-migration", "--help"] }, 0],
         [{ cli: ["import-typeorm", "--help"] }, 0],
         [{ cli: ["init-nest", "--help"] }, 0],
+        [{ cli: ["init-pg", "--help"] }, 0],
         [{ cli: ["studio", "--help"] }, 0],
         [{ cli: ["inspect", database] }, 0],
         [{ cli: ["migrate", database, "--dry-run"] }, 0],
@@ -412,18 +444,18 @@ console.log(JSON.stringify(report));
       const report = await probe(steps.map(([step]) => step));
       assert.deepEqual(
         report.map((entry, index) => ({ step: steps[index]?.[0], ...entry })),
-        steps.map(([step, code]) => ({ step, code, parser: false })),
+        steps.map(([step, code]) => ({ step, code, parser: false, client: false })),
       );
     });
 
     it("is loaded when migrations are collected: by init, and by a schema diff that is given migrations", async () => {
       assert.deepEqual(await probe([{ cli: ["diff-schema", database, database] }, { cli: ["diff-schema", migrations, database] }]), [
-        { code: 0, parser: false },
-        { code: 0, parser: true },
+        { code: 0, parser: false, client: false },
+        { code: 0, parser: true, client: false },
       ]);
       assert.deepEqual(await probe([{ cli: ["inspect", database] }, { cli: ["init", migrations, "--out", join(dir, "again.db")] }]), [
-        { code: 0, parser: false },
-        { code: 0, parser: true },
+        { code: 0, parser: false, client: false },
+        { code: 0, parser: true, client: false },
       ]);
     });
 
@@ -434,9 +466,21 @@ console.log(JSON.stringify(report));
       const changed = join(dir, "changed.schema.json");
       writeFileSync(changed, JSON.stringify(document));
       assert.deepEqual(await probe([{ cli: ["plan-migration", database, changed, "--json"] }, { cli: ["generate-migration", database, changed, "--dialect", "postgres"] }]), [
-        { code: 0, parser: false },
-        { code: 0, parser: true },
+        { code: 0, parser: false, client: false },
+        { code: 0, parser: true, client: false },
       ]);
+    });
+
+    it("the client of PostgreSQL servers is loaded by init-pg alone, which also collects with the parser what it read", async () => {
+      const server = await startDisposablePostgres("create table notes (id serial primary key, body text not null);");
+      try {
+        assert.deepEqual(await probe([{ cli: ["inspect", database] }, { cli: ["init-pg", server.url, "--out", join(dir, "scanned.db")] }]), [
+          { code: 0, parser: false, client: false },
+          { code: 0, parser: true, client: true },
+        ]);
+      } finally {
+        await server.stop();
+      }
     });
   });
 });

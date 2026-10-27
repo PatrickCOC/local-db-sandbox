@@ -176,8 +176,9 @@ describe("Studio's page and its API", { timeout: 180_000 }, () => {
       // It is JavaScript that a browser can read.
       assert.doesNotThrow(() => new Script(scripts[0]?.[2] as string, { filename: "studio-page.js" }));
       // Nothing is fetched from another place, and nothing runs but that script.
-      // The one address in it is the example in the API tab's empty URL field (D-046), which is text, and is not loaded.
-      assert.deepEqual(page.text.match(/https?:\/\/[^\s"'<)]+/g) ?? [], ["http://127.0.0.1:3000/"]);
+      // The addresses in it are the example in the API tab's empty URL field (D-046), which is text, and the name of SVG's
+      // namespace, which the ER diagram's elements are made in (D-053): a name, which no browser loads.
+      assert.deepEqual(page.text.match(/https?:\/\/[^\s"'<)]+/g) ?? [], ["http://127.0.0.1:3000/", "http://www.w3.org/2000/svg"]);
       assert.deepEqual(page.text.match(/\s(src|href|action)\s*=/g) ?? [], []);
       assert.deepEqual(page.text.match(/\son[a-z]+\s*=/g) ?? [], []);
       assert.equal(page.text.includes("javascript:"), false);

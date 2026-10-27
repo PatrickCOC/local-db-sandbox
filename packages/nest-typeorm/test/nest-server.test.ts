@@ -179,14 +179,15 @@ describe("NestJS project with a parallel sandbox server", { timeout: 180_000 }, 
         /\nWrote sandbox\.db \(database directory: an empty file per table, and their definitions\)\.\nWrote \.local-db-sandbox\/sandbox\.server\.ts\nWrote \.local-db-sandbox\/sandbox\.config\.json\n/,
       );
       assert.ok(init.stdout.includes(`\nSandbox port: ${sandboxPort}\nAdded the "sandbox" script to package.json.\n`));
-      assert.ok(
-        init.stdout.endsWith(
-          "Start the sandbox with: npm run sandbox   (restarts when the application's sources change)\n" +
-            "Start it once, without watching: node .local-db-sandbox/sandbox.server.ts\n" +
-            "The application's own sources and start command are unchanged.\n",
-        ),
-        init.stdout,
-      );
+      // The project is in no Git repository: .gitignore is left alone, and that is said. Then what to run next.
+      const ending = init.stdout.slice(init.stdout.indexOf("\n.gitignore was not changed:") + 1).split("\n");
+      assert.match(ending[0] ?? "", /^\.gitignore was not changed: .* is not in a Git repository \(no \.git there or above\)\.$/);
+      assert.deepEqual(ending.slice(1, 3), ["The application's own sources and start command are unchanged.", "Next steps:"]);
+      assert.match(ending[3] ?? "", /^ {2}npm run sandbox +start the application on the sandbox database; it restarts when its sources change$/);
+      assert.match(ending[4] ?? "", /^ {2}node \.local-db-sandbox\/sandbox\.server\.ts +or start it once, without watching$/);
+      // Studio in the project needs no path: it finds the database by the configuration that init-nest wrote. From elsewhere, as here, it is named.
+      assert.match(ending[5] ?? "", /^ {2}local-db-sandbox studio \S+\/sandbox\.db +then, in a second terminal: look into the rows, and send requests to the application$/);
+      assert.deepEqual(ending.slice(6), [""]);
     });
 
     it("writes a small entry point and configuration under .local-db-sandbox", async () => {

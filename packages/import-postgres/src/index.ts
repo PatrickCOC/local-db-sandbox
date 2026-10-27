@@ -1,3 +1,5 @@
+export { CATALOG_SOURCE, MINIMUM_SERVER_VERSION, PostgresScanError, SCAN_FILE, isSystemSchema, scanPostgresDatabase } from "./catalog-scan.ts";
+export type { PostgresScanErrorCode, ScanNote, ScanOptions, ScannedSchema } from "./catalog-scan.ts";
 export { COLLECTOR_SOURCE, MigrationError, collectMigrationFiles, collectPostgresMigrations } from "./collector.ts";
 export type { CollectOptions, CollectedSchema, SchemaProvenance, SourceLocation } from "./collector.ts";
 export { MIGRATION_DIRECTORIES, MigrationSourceError, findMigrationsDirectory, readMigrationFiles } from "./migrations.ts";
@@ -5,3 +7,5 @@ export type { MigrationFile } from "./migrations.ts";
 export { MigrationSyntaxError } from "./parser.ts";
 export { formatReportEntry, summarizeReport } from "./report.ts";
 export type { MigrationSummary, ReportCategory, ReportEntry, ReportOutcome } from "./report.ts";
+export { DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_QUERY_TIMEOUT_MS, PostgresConnectionError, describeTarget, parseConnectionUrl } from "./pg-client.ts";
+export type { PostgresConnectionErrorCode, PostgresConnectionOptions, PostgresTarget } from "./pg-client.ts";

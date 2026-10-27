@@ -1,6 +1,6 @@
 import { request as httpRequest } from "node:http";
 import { AccessError, DEFAULT_ACCESS_LIMITS, assertMadeFor, changesData, isAccessErrorCode } from "./access.ts";
-import type { AccessInfo, AccessOperation, BrowseRequest, BrowseResult, ChangeResult, EventsResult, RequestOptions, RowKey, RowResult, RuntimeAccess, SchemaInfo, SqlRequest, SqlResult } from "./access.ts";
+import type { AccessInfo, AccessOperation, BrowseRequest, BrowseResult, ChangeResult, EventsResult, RequestOptions, RowKey, RowResult, RuntimeAccess, SchemaInfo, SnapshotRequest, SnapshotResult, SqlRequest, SqlResult, ClearRequest, ClearResult } from "./access.ts";
 import { ACCESS_PATH, HEALTH_PATH } from "./control-server.ts";
 
 /*
@@ -68,7 +68,8 @@ export class ControlClient implements RuntimeAccess {
     this.#token = target.token;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#maxRequestBytes = options.maxRequestBytes ?? DEFAULT_ACCESS_LIMITS.maxRequestBytes;
-    this.#maxResponseBytes = options.maxResponseBytes ?? 4 * DEFAULT_ACCESS_LIMITS.maxResponseBytes;
+    // An answer may be a snapshot, which may be larger than any other (with what the answer says around it).
+    this.#maxResponseBytes = options.maxResponseBytes ?? Math.max(4 * DEFAULT_ACCESS_LIMITS.maxResponseBytes, DEFAULT_ACCESS_LIMITS.maxSnapshotBytes + 1_048_576);
   }
 
   #stranger(): AccessError {
@@ -231,5 +232,13 @@ export class ControlClient implements RuntimeAccess {
 
   events(request?: { after?: number }, options?: RequestOptions): Promise<EventsResult> {
     return this.#ask("events", request, options) as Promise<EventsResult>;
+  }
+
+  snapshot(request: SnapshotRequest, options?: RequestOptions): Promise<SnapshotResult> {
+    return this.#ask("snapshot", request, options) as Promise<SnapshotResult>;
+  }
+
+  clear(request: ClearRequest, options?: RequestOptions): Promise<ClearResult> {
+    return this.#ask("clear", request, options) as Promise<ClearResult>;
   }
 }

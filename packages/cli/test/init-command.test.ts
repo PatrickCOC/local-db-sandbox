@@ -44,9 +44,11 @@ describe("CLI: init (PostgreSQL migrations to a sandbox database)", () => {
   it("prints its help, and is listed in the general help", async () => {
     const { code, stdout } = await run("init", "--help");
     assert.equal(code, 0);
-    assert.match(stdout, /Usage: local-db-sandbox init <project-or-migrations>/);
+    assert.match(stdout, /Usage: local-db-sandbox init \[project-or-migrations\]/);
+    assert.match(stdout, /\(default: the current\s+directory\)\. For a NestJS \+ TypeORM project, use init-nest; to read the schema\s+of a running PostgreSQL database, use init-pg\./);
+    assert.match(stdout, /--no-gitignore\s+Leave \.gitignore alone\./);
     assert.match(stdout, /row level security,\s+roles and grants, extensions, functions, triggers, scheduled jobs/);
-    assert.match((await run("--help")).stdout, /init <project-or-migrations>/);
+    assert.match((await run("--help")).stdout, /init \[project-or-migrations\]/);
   });
 
   it("creates a database from a project's migrations, with their rows, and writes the report", async () => {
@@ -62,7 +64,9 @@ describe("CLI: init (PostgreSQL migrations to a sandbox database)", () => {
     assert.match(stdout, /notes: 4 columns, 1 row/);
     assert.match(stdout, /enumerated types: mood/);
     assert.match(stdout, /row level security and policies: 1 statement/);
-    assert.match(stdout, /Next: local-db-sandbox postgrest /);
+    // The next steps, with the database as a command line takes it: `/` between its parts, in every shell.
+    assert.match(stdout, /\nNext steps:\n {2}local-db-sandbox studio \S+ +look into the rows, and change them\n {2}local-db-sandbox postgrest \S+ +serve the database to supabase-js clients\n$/);
+    assert.doesNotMatch(stdout.slice(stdout.indexOf("Next steps:")), /\\/);
 
     // The database is a directory of the current format, made by the runtime: the computed default is filled in.
     assert.deepEqual([inspectDatabase(database).formatVersion, inspectDatabase(database).compatibility], [5, "current"]);

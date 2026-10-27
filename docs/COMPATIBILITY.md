@@ -444,6 +444,77 @@ A database is not written either when its definitions could not be read back fro
 - An existing database is replaced only with `--force`, and its rows are lost. `diff-schema <database> <migrations>` says what new migrations change in it; applying that to a database while keeping its rows is not implemented.
 - A computed default in a seed row (`updated_at` of a row inserted by a migration) is computed once, when `init` creates the database.
 
+## PostgreSQL catalog scan (`init-pg`)
+
+`local-db-sandbox init-pg <connection-url>` reads the schema of a running PostgreSQL database from its system catalog and creates a sandbox database from it, as `init` does from migrations. Status: experimental (D-049). It is the one command that connects to a database server.
+
+| PostgreSQL | Status |
+|---|---|
+| 18.6, a PostgreSQL server (Windows x64 build, SCRAM passwords, no TLS) | **tested**: the whole flow, `init-pg`, the database, and Local DB Studio, as a read-only role, on a throwaway cluster with the synthetic schemas of the tests (2026-10-26); the server's statement log showed only `BEGIN ... READ ONLY`, catalog `SELECT`s, and `ROLLBACK` |
+| 18.6, PGlite 0.5.11 (WebAssembly, served over the wire protocol) | **tested**: the automated tests |
+| 12 to 17 | **targeted, not tested**: the catalog columns the scan reads are there from PostgreSQL 12 (`attgenerated`); no run has been made on these versions |
+| older than 12 | refused, with the server's version |
+
+The catalog is written as the statements that would create what it holds, with PostgreSQL's own functions for each part (`format_type`, `pg_get_expr`, `pg_get_constraintdef`, `pg_get_indexdef`), and those statements go through the collector of `init`. So every rule of the section above holds for a scanned schema: the storage types, the canonical types, defaults, numbering, keys, foreign keys, unique constraints, indexes, enumerated types, and what is kept as information or unsupported. The statements are in the report (`script`), and the report's entries refer to their lines.
+
+### What is sent to the server
+
+| | |
+|---|---|
+| Connection | one, TCP, to the host the URL names; TLS as `sslmode` says (default `prefer`); unnamed statements, no type lookup at connect; `application_name` `local-db-sandbox init-pg` |
+| Transaction | `BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`; `statement_timeout` and `lock_timeout` for the transaction alone; `ROLLBACK` at the end, also after a failure |
+| Queries | `SELECT`s of `pg_catalog` only: `pg_namespace`, `pg_class`, `pg_attribute`, `pg_attrdef`, `pg_type`, `pg_enum`, `pg_constraint`, `pg_index`, `pg_trigger`, `pg_depend`, `pg_extension`, `pg_inherits`, `pg_collation`, and `has_schema_privilege`. No table of the database is named, and no row of one is read |
+| Time | connecting 10 s, each query 30 s (`--connect-timeout`, `--query-timeout`); past that the client closes the connection |
+
+### Why `pg_catalog`, and what a role needs
+
+`information_schema` shows a role only the objects it has privileges on: `table_constraints` lists a constraint only to the owner of its table or to a role with a privilege other than `SELECT` on it. A read-only role would see tables without keys or foreign keys, and nothing would say that anything was missing. `pg_catalog` is readable by every role unless an administrator restricted it.
+
+| The role | What happens |
+|---|---|
+| may connect, and use the schemas it reads (`USAGE`) | the whole schema is read, whatever privileges it has on the tables (none are needed) |
+| has no `USAGE` on a schema it is asked to read | refused before anything is read, with the `GRANT` to run. Without `USAGE`, PostgreSQL leaves the schema out of the search path and writes its names with the schema, so its tables would read as another schema's |
+| may not read the catalog (`SELECT` on `pg_class` and the like revoked) | refused, with PostgreSQL's message (`42501`) and the role's name |
+| may not connect, wrong password, no such database | refused, with PostgreSQL's message (`28P01`, `28000`, `3D000`) |
+
+### What is read, and what becomes of it
+
+| In PostgreSQL | Locally |
+|---|---|
+| tables (`relkind` `r`) and partitioned tables (`p`) of the schemas read | tables, named without their schema. A partitioned table is one ordinary table, with its key |
+| columns: type (`format_type`), `NOT NULL`, default (`pg_get_expr`), identity, generated columns, collation that differs from the type's | as in a `CREATE TABLE` of a migration |
+| primary keys, unique constraints, check constraints, exclusion constraints, foreign keys (`pg_get_constraintdef`) | as in `ALTER TABLE ... ADD CONSTRAINT`: keys and foreign keys enforced, checks kept as information, exclusion constraints unsupported |
+| indexes that are no constraint's own (`pg_get_indexdef`) | as in `CREATE INDEX` |
+| enumerated types of the schemas read | enumerated types |
+| `NOT NULL` constraints of PostgreSQL 18 (`contype` `n`) | read as the columns' `NOT NULL` |
+
+### Not reproduced, and said so (a note each)
+
+| In PostgreSQL | Note |
+|---|---|
+| a foreign key to a table that is not read (another schema, or not an ordinary table) | not reproduced; the column takes any value |
+| a column of a type of a schema that is not read | kept as PostgreSQL's own type (`other`), stored as given |
+| tables, types, and other objects that belong to an extension | left out |
+| views, materialized views, foreign tables | not created |
+| partitions | not created; their partitioned table is |
+| row level security, triggers, constraint triggers | not reproduced |
+| table inheritance | the child is created with all its columns, without the inheritance |
+| an index that is not valid (a build that did not finish) | left out |
+
+PostgreSQL's own schemas (`pg_catalog`, `information_schema`, any `pg_*`) are refused before anything is connected to. Sequences are not read: what they do for a column (`serial`, `nextval(...)`, identity) is read from the column.
+
+### One namespace
+
+The sandbox has no schemas. When several schemas are read, two of them with an object of the same name are refused, and every such name is listed: two tables, two indexes, two enumerated types, or a table and an enumerated type (a table has a type of its own name). Nothing takes another's place.
+
+### Limits
+
+- No rows: there is no option to copy them, and the new database is empty.
+- A scanned database is not kept in step with its source: `init-pg --force` makes it again, and its rows are lost.
+- One host, over TCP; no Unix socket; of the URL's parameters only `sslmode`. `sslmode=require` or `verify-full` against a server without TLS fails with a message that says so: at once against PostgreSQL, which closes the connection, and only after the connect timeout against a server that says nothing more after refusing TLS (PGlite does that).
+- Domains, composite types, range types, and the types of extensions are types the sandbox does not know: kept as information, stored as given.
+- Targets PostgreSQL 12 and later; tested on PostgreSQL 18.6 only (the table above).
+
 ## Schema diff (`diff-schema`)
 
 `local-db-sandbox diff-schema <before> <after>` says what differs between two schemas. It reads both and changes neither, and it generates no SQL: the result is a list of changes, as lines or as JSON. Status: experimental (D-036 and D-037). Verified with a real Supabase project's migrations (the record is kept outside this repository).
@@ -972,6 +1043,55 @@ What is kept of a message is what a developer needs to see: the envelope, the he
 - The guard is installed in the process that runs the application, not in the watcher.
 - It is a development aid. It is not a sandbox in the security sense, and is not a reason to run code you do not trust.
 
+## Clearing rows (Studio's Clear data tab)
+
+The access's `clear` operation (D-051) deletes every row of the tables named, in one transaction (`BEGIN`, `PRAGMA defer_foreign_keys = ON`, `DELETE FROM` each, `COMMIT`; rolled back when anything fails, the save included). The definitions of the tables are not touched.
+
+| Case | What happens |
+|---|---|
+| Tables chosen that refer to one another, or to themselves | Cleared together: their foreign keys are checked at the end of the transaction |
+| A table not chosen, whose rows refer to a chosen one (every column of the key set) | Refused before anything is done (`CONSTRAINT`), naming the table, the columns, and the rows |
+| A table not chosen, whose rows refer to nothing (a column of the key NULL), or that has no rows | No obstacle |
+| `ON DELETE CASCADE` among the tables chosen | Deletes rows of chosen tables only |
+| A numbered key | Not reset while the database stays open; after it is opened again, it goes on after the largest key the rows hold (1 for an emptied table) |
+| A read-only Studio, a single-file database | Refused (`READ_ONLY`) |
+| The application has a transaction open | Refused (`BUSY`) |
+| Attached to a sandbox | Carried out in the sandbox's runtime, through its control |
+
+## SQL export (Studio's Export tab)
+
+Studio's Export tab writes the tables a person chooses as an SQL script for PostgreSQL (D-050). Status: experimental. Tested on PostgreSQL 18.6 (PGlite in the automated tests, and a PostgreSQL 18.6 server, by `psql -f`); other versions are targeted and not tested.
+
+| Part of the sandbox's schema | In the script |
+|---|---|
+| table, columns in order, NOT NULL | `CREATE TABLE` |
+| primary key (one or several columns, its name) | `CONSTRAINT ... PRIMARY KEY` |
+| unique constraint | `CONSTRAINT ... UNIQUE` |
+| check constraint | `CONSTRAINT ... CHECK`, its text as the source wrote it (given to PostgreSQL's parser before the file is made) |
+| default: a constant, `current_timestamp`, `current_date`, an expression of the source | `DEFAULT ...` |
+| numbered column (single integer key) | `GENERATED BY DEFAULT AS IDENTITY`; with rows, the rows' values (`OVERRIDING SYSTEM VALUE`) and `setval` past the largest |
+| foreign key (one or several columns, actions) | `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY`, after the rows; left out, and said, when its table is not exported |
+| index | `CREATE [UNIQUE] INDEX`, with its keys, method, condition |
+| enumerated type | `CREATE TYPE ... AS ENUM` |
+| what the generator refuses (D-039, D-040) | the export is refused |
+
+| A value | In the script |
+|---|---|
+| NULL | `NULL` |
+| boolean | `true` / `false` |
+| whole number; one beyond JavaScript's (kept as its digits) | its digits |
+| decimal, floating point | the number; a decimal kept as text, its digits |
+| text, varchar, char, uuid, date, time, timestamp, a value of an enumerated type | a constant: quotes doubled, a backslash in the escape form (`E'...'`) |
+| JSON, JSONB | its text, keys in code point order, as a constant of the type (`'...'::jsonb`) |
+| array | `ARRAY[...]::type[]` |
+| bytes | `'\x...'::bytea` |
+| a value of a column without a canonical type (data only) | as the sandbox stores it: a number, a boolean, or a text constant that PostgreSQL reads into the target column's type; said in a warning |
+| a value that is no value of its column's type | the export is refused, with the table, the column, and the row |
+
+A script is one transaction. A schema-and-data script loads into a database without the tables; a data-only script into one that has them, empty. A timestamp without time zone is written as the sandbox holds it, in UTC.
+
+Not provided: import of a script into a sandbox, scripts for the sandbox's own SQL or for another database, views, choosing rows within a table, and exports above the limits (a snapshot of 32 MiB as JSON, a script of 64 MiB).
+
 ## Local DB Studio, and who has a database open
 
 Experimental (D-042). `local-db-sandbox studio <database>` serves a page that looks into a sandbox database through the relational runtime. This section is the contract of the three things that came with it: the record of a database's owner, the access to a runtime, and the page.
@@ -1122,5 +1242,30 @@ Experimental (D-046). `POST /api/request`, with the session's key as for every r
 - Attaching to the REST sandbox or to a SQL console. Reading a stored database again while a read-only Studio is open.
 - TypeORM entities as a source of definitions: a database that stores none is described from its rows.
 - Access from another machine, accounts, and connections to a database server.
-- Import and export, ERD, charts, and a query builder.
+- Import, charts, a query builder, and the ER diagram as a file. (Export is the Export tab, and the ER diagram the ER Diagram tab: below.)
 - In the API tab: requests to another machine, `https:`, following redirects, collections, saved requests or history, environments and variables, assertions and reports, importing API descriptions, and starting or watching the application.
+
+## ER diagram (Studio's ER Diagram tab)
+
+Studio's ER Diagram tab draws the tables of the database and their foreign keys (D-053). Status: experimental. It is made from the tables' definitions (the canonical schema), as a snapshot without rows gives them: no row is read, and nothing is changed.
+
+| Case | What the diagram shows |
+|---|---|
+| A table | a box: its name; for each column `PK` / `FK`, its name, its type, and `null` or `not null` |
+| A type | as the Rows tab shows it: as declared, else the canonical type, else how the runtime stores it |
+| A primary key over several columns | `PK` on each of its columns; the key, in its order, in the box's tooltip |
+| A foreign key over one column (`references`) | a line from that column to the column it refers to, with an arrow there |
+| A foreign key over several columns (`foreignKeys`) | one line per pair of columns, marked together; the whole key in each line's tooltip, with `ON DELETE` / `ON UPDATE` |
+| A table that refers to itself | a line that loops out of the table's right side and back |
+| Tables that refer to one another in a circle | every foreign key, as it is |
+| A table with no foreign key, that none refers to | a box of its own; such tables stand together, by name |
+| A foreign key to a table the database does not have | not drawn; named above the diagram, and counted |
+| A relationship that no foreign key declares (an ORM relation without one) | not shown |
+| A name or a type longer than 40 character cells (CJK and emoji take two) | cut with `…` in the box, whole in its tooltip |
+| A name with markup, quotes, or `&` | shown as text |
+| More than 400 tables, or more than 8,000 columns | refused (`DIAGRAM_TOO_LARGE`), before anything is read |
+| A read-only Studio, a single-file database, attached to a sandbox | the same diagram; attached, read from the sandbox's runtime |
+
+- Layout: Dagre 3.1.3 (MIT), on Studio's server, for each group of connected tables (tables referred to stand left of those that refer to them, or above them when a group is far better seen so); a table that many are connected to alone gets them as a block. The same schema is always laid out the same way.
+- Drawing and using it are the page's: zoom from 2% to 400%, pan, Fit to view (the first view), search by part of a name (case-insensitive), a click that marks a table's foreign keys, dragging, and Auto arrange. Where a table was moved to is not kept: not in the browser, not in the database.
+- It is drawn again when the tab is shown after the tables' definitions changed; a change of rows does not move anything.

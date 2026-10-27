@@ -1,3 +1,5 @@
+export { DEFAULT_MAX_EXPORT_BYTES, MODE_LABEL, SQL_EXPORT_MODES, exportPostgresSql } from "./export.ts";
+export type { SqlExport, SqlExportInput, SqlExportMode, SqlExportRefusal } from "./export.ts";
 export { generatePostgresMigration, stringifyPostgresGeneration } from "./generator.ts";
 export type { PostgresGeneration, PostgresGenerationOptions, StepAssessment } from "./generator.ts";
 export { POSTGRES_MIGRATION_VERSION, renderPostgresMigration, stringifyPostgresMigration } from "./migration.ts";

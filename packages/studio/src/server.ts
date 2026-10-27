@@ -2,9 +2,11 @@ import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { DEFAULT_ACCESS_LIMITS, answerAccessRequest, hasToken, pathOf, readBody, sendJson } from "../../runtime-access/src/index.ts";
+import { AccessError, DEFAULT_ACCESS_LIMITS, answerAccessRequest, hasToken, pathOf, readBody, sendJson } from "../../runtime-access/src/index.ts";
+import type { SnapshotResult } from "../../runtime-access/src/index.ts";
 import { ApiRequestError, apiDestination, sendApiRequest } from "./api-request.ts";
 import type { ApiRequestErrorCode } from "./api-request.ts";
+import { DiagramTooLargeError, checkDiagramSize, diagramOf, layoutDiagram } from "./diagram.ts";
 import { studioPage } from "./page.ts";
 import type { StudioSession } from "./session.ts";
 
@@ -17,6 +19,10 @@ import type { StudioSession } from "./session.ts";
  *                                   { "for"?: <owner>, "request"?: ... } -> { "result" } or { "error": { "code", "message" } }
  *   POST /api/request               the API tab (D-046): { "request": { method, url, headers?, body? } }, sent to an
  *                                   API on this machine (api-request.ts) -> { "result": <its answer> } or { "error" }
+ *   POST /api/export                the Export tab (D-050): { "request": { tables, mode, confirmData? } } -> { "result":
+ *                                   { fileName, sql, tables, mode, rows, statements, warnings, bytes } } or { "error" }
+ *   POST /api/diagram               the ER Diagram tab (D-053): { "request": { tables } } -> { "result": <ErDiagram> }, the
+ *                                   tables' definitions as a snapshot without rows gives them, laid out (diagram.ts)
  *
  * Behind the database's part of the API is the access to the runtime
  * (`answerAccessRequest`, which the control answers with too): Studio has no
@@ -46,8 +52,27 @@ const ACCESS = "/api/access/";
 /** The status of an answer that says why a request of the API tab was not sent, or not answered. */
 const API_ERROR_STATUS: Record<ApiRequestErrorCode, number> = { INVALID_REQUEST: 400, DESTINATION_REFUSED: 403, CONNECTION_REFUSED: 502, CONNECTION_FAILED: 502, TIMEOUT: 504 };
 
+/** What an export writes: the definitions, the rows, or both. */
+export type StudioExportMode = "schema" | "data" | "schema-and-data";
+export const STUDIO_EXPORT_MODES: readonly StudioExportMode[] = ["schema", "data", "schema-and-data"];
+
+/** What an export of tables gave: a whole script, or every reason there is none. */
+export type StudioExportOutcome =
+  | { status: "exported"; sql: string; tables: string[]; rows: number; statements: number; warnings: string[] }
+  | { status: "refused"; refusals: { table?: string; column?: string; message: string }[] };
+
+/**
+ * Writes a snapshot of tables as a script. Studio knows no SQL dialect: whoever starts it gives it one (the CLI gives
+ * PostgreSQL's, D-050). Without one, the Export tab says that there is none.
+ */
+export type StudioExporter = (snapshot: SnapshotResult, request: { tables: string[]; mode: StudioExportMode }) => Promise<StudioExportOutcome>;
+
+export const EXPORT_DATA_UNCONFIRMED = "An export with data writes the rows of the tables, which may be data you entered, into a file: it is made only when that is confirmed (confirmData).";
+
 export interface StudioServerOptions {
   session: StudioSession;
+  /** What writes an export (the Export tab). */
+  exporter?: StudioExporter;
   /** Default 4583; 0 for any free port. The host is this machine's own address, always. */
   port?: number;
   /** The address of a local API that the API tab starts from (`--api`). Only a loopback address is taken. */
@@ -78,7 +103,7 @@ export async function startStudioServer(options: StudioServerOptions): Promise<S
   const page = studioPage(nonce);
   // `img-src`: the icon a browser asks its server for by itself. The page has no image.
   const policy = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
-  const limits = { maxRequestBytes: DEFAULT_ACCESS_LIMITS.maxRequestBytes, maxResponseBytes: DEFAULT_ACCESS_LIMITS.maxResponseBytes };
+  const limits = { maxRequestBytes: DEFAULT_ACCESS_LIMITS.maxRequestBytes, maxResponseBytes: DEFAULT_ACCESS_LIMITS.maxResponseBytes, maxSnapshotBytes: DEFAULT_ACCESS_LIMITS.maxSnapshotBytes };
   let port = 0;
 
   const handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
@@ -164,6 +189,100 @@ export async function startStudioServer(options: StudioServerOptions): Promise<S
           throw error;
         }
         sendJson(response, API_ERROR_STATUS[error.code], { error: { code: error.code, message: error.message } });
+      }
+      return;
+    }
+    if (path === "/api/export") {
+      if (method !== "POST") {
+        refuse(405, "INVALID_REQUEST", "An export is asked for with POST.");
+        return;
+      }
+      const text = await readBody(request, limits.maxRequestBytes);
+      let given: { request?: { tables?: unknown; mode?: unknown; confirmData?: unknown } } | undefined;
+      try {
+        given = text === undefined ? undefined : JSON.parse(text);
+      } catch {
+        given = undefined;
+      }
+      const asked = given?.request;
+      const tables = asked?.tables;
+      const mode = asked?.mode as StudioExportMode;
+      if (typeof asked !== "object" || asked === null || !Array.isArray(tables) || tables.length === 0 || !tables.every((name) => typeof name === "string") || !STUDIO_EXPORT_MODES.includes(mode)) {
+        sendJson(response, 400, { error: { code: "INVALID_REQUEST", message: `An export is asked for with { "request": { "tables": [at least one table], "mode": one of ${STUDIO_EXPORT_MODES.join(", ")} } }.` } });
+        return;
+      }
+      if (mode !== "schema" && asked.confirmData !== true) {
+        sendJson(response, 400, { error: { code: "INVALID_REQUEST", message: EXPORT_DATA_UNCONFIRMED } });
+        return;
+      }
+      if (options.exporter === undefined) {
+        sendJson(response, 501, { error: { code: "NOT_AVAILABLE", message: "This Studio was started without a way to write SQL." } });
+        return;
+      }
+      let snapshot: SnapshotResult;
+      try {
+        // Read whole, at one moment, and nothing of the database changed by it.
+        snapshot = await session.access.snapshot({ tables: tables as string[], rows: mode !== "schema" });
+      } catch (error) {
+        if (!(error instanceof AccessError)) {
+          throw error;
+        }
+        sendJson(response, error.status, { error: error.toJSON() });
+        return;
+      }
+      const outcome = await options.exporter(snapshot, { tables: tables as string[], mode });
+      if (outcome.status === "refused") {
+        // Nothing is given when anything was refused: never a script that holds part of what was asked for.
+        sendJson(response, 422, { error: { code: "EXPORT_REFUSED", message: `The export was not made: ${outcome.refusals.length === 1 ? "one reason" : `${outcome.refusals.length} reasons`}.`, refusals: outcome.refusals } });
+        return;
+      }
+      // When it was made, in UTC: 20261026T072300Z. The file's name holds nothing of the database or of where it is.
+      const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+      sendJson(response, 200, {
+        result: {
+          fileName: `local-db-export-${mode}-${stamp}.sql`,
+          sql: outcome.sql,
+          tables: outcome.tables,
+          mode,
+          rows: outcome.rows,
+          statements: outcome.statements,
+          warnings: outcome.warnings,
+          bytes: Buffer.byteLength(outcome.sql),
+        },
+      });
+      return;
+    }
+    if (path === "/api/diagram") {
+      if (method !== "POST") {
+        refuse(405, "INVALID_REQUEST", "A diagram is asked for with POST.");
+        return;
+      }
+      const text = await readBody(request, limits.maxRequestBytes);
+      let given: { request?: { tables?: unknown } } | undefined;
+      try {
+        given = text === undefined ? undefined : JSON.parse(text);
+      } catch {
+        given = undefined;
+      }
+      const tables = given?.request?.tables;
+      if (!Array.isArray(tables) || !tables.every((name) => typeof name === "string") || new Set(tables).size !== tables.length) {
+        sendJson(response, 400, { error: { code: "INVALID_REQUEST", message: 'A diagram is asked for with { "request": { "tables": [the tables, each once] } }.' } });
+        return;
+      }
+      try {
+        // Refused before anything is read, when there are more tables than a diagram is made of.
+        checkDiagramSize(tables.length, 0);
+        // The definitions alone: no row is read for a diagram, and nothing is changed.
+        const definitions = tables.length === 0 ? [] : (await session.access.snapshot({ tables: tables as string[], rows: false })).schema.tables;
+        sendJson(response, 200, { result: await layoutDiagram(diagramOf(definitions)) });
+      } catch (error) {
+        if (error instanceof DiagramTooLargeError) {
+          sendJson(response, 413, { error: { code: error.code, message: error.message } });
+        } else if (error instanceof AccessError) {
+          sendJson(response, error.status, { error: error.toJSON() });
+        } else {
+          throw error;
+        }
       }
       return;
     }

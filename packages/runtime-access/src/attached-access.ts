@@ -1,7 +1,7 @@
 import { canonicalDatabasePath, describeOwner, inspectOwner } from "../../storage-json/src/index.ts";
 import type { OwnerInspection, OwnerKind } from "../../storage-json/src/index.ts";
 import { AccessError, assertMadeFor } from "./access.ts";
-import type { AccessInfo, BrowseRequest, BrowseResult, ChangeResult, EventsResult, RequestOptions, RowKey, RowResult, RuntimeAccess, SchemaInfo, SqlRequest, SqlResult } from "./access.ts";
+import type { AccessInfo, BrowseRequest, BrowseResult, ChangeResult, EventsResult, RequestOptions, RowKey, RowResult, RuntimeAccess, SchemaInfo, SnapshotRequest, SnapshotResult, SqlRequest, SqlResult, ClearRequest, ClearResult } from "./access.ts";
 import { ControlClient } from "./control-client.ts";
 import type { ControlClientOptions } from "./control-client.ts";
 
@@ -249,5 +249,13 @@ export class AttachedRuntimeAccess implements RuntimeAccess {
 
   events(request?: { after?: number }, options?: RequestOptions): Promise<EventsResult> {
     return this.#read(options, (client) => client.events(request));
+  }
+
+  snapshot(request: SnapshotRequest, options?: RequestOptions): Promise<SnapshotResult> {
+    return this.#read(options, (client) => client.snapshot(request));
+  }
+
+  clear(request: ClearRequest, options?: RequestOptions): Promise<ClearResult> {
+    return this.#write(options, (client) => client.clear(request));
   }
 }

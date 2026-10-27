@@ -1,4 +1,5 @@
-import type { ColumnType, PersistenceMode, SqlOperation } from "../../runtime/src/index.ts";
+import type { Row } from "../../core/src/index.ts";
+import type { ColumnType, EnumType, PersistenceMode, SqlOperation, TableSchema } from "../../runtime/src/index.ts";
 import type { DatabaseFormat, OwnerKind } from "../../storage-json/src/index.ts";
 
 /*
@@ -40,6 +41,8 @@ export interface AccessLimits {
   maxResponseBytes: number;
   /** SQL events that are kept for whoever asks later. */
   maxEvents: number;
+  /** Bytes, as JSON, of a snapshot of tables (`snapshot`): their definitions and, when asked for, all their rows. */
+  maxSnapshotBytes: number;
 }
 
 export const DEFAULT_ACCESS_LIMITS: Readonly<AccessLimits> = Object.freeze({
@@ -54,6 +57,7 @@ export const DEFAULT_ACCESS_LIMITS: Readonly<AccessLimits> = Object.freeze({
   maxRequestBytes: 1_048_576,
   maxResponseBytes: 8_388_608,
   maxEvents: 200,
+  maxSnapshotBytes: 33_554_432,
 });
 
 export type AccessErrorCode =
@@ -277,6 +281,40 @@ export interface EventsResult {
   last: number;
 }
 
+/** Tables whose definitions, and rows when `rows` is set, are asked for whole: what an export is made from. */
+export interface SnapshotRequest {
+  /** By name; at least one, each once. */
+  tables: string[];
+  rows: boolean;
+}
+
+/**
+ * The tables asked for as they are at one moment: their definitions as the
+ * runtime has them (the canonical schema, D-036), the enumerated types their
+ * columns take, and, when asked for, every row, whole, as fixture values.
+ * Nothing is cut short: a snapshot that would be larger than an access gives
+ * (`maxSnapshotBytes`) is refused as a whole.
+ */
+export interface SnapshotResult {
+  /** In the order the runtime has the tables. */
+  schema: { tables: TableSchema[]; types: { enums: EnumType[] } };
+  /** By table; only when rows were asked for. */
+  rows?: Record<string, Row[]>;
+}
+
+/** Tables whose rows are all to be deleted, their definitions kept. */
+export interface ClearRequest {
+  /** By name; at least one, each once. */
+  tables: string[];
+}
+
+/** How many rows each table had, which are gone; all of them in one transaction. */
+export interface ClearResult {
+  /** In the order the runtime has the tables. */
+  tables: { table: string; rows: number }[];
+  rows: number;
+}
+
 /** What a request says beside what it asks. */
 export interface RequestOptions {
   /**
@@ -299,13 +337,17 @@ export interface RuntimeAccess {
   delete(request: { table: string; key: RowKey }, options?: RequestOptions): Promise<ChangeResult>;
   sql(request: SqlRequest, options?: RequestOptions): Promise<SqlResult>;
   events(request?: { after?: number }, options?: RequestOptions): Promise<EventsResult>;
+  /** Reads, and changes nothing. */
+  snapshot(request: SnapshotRequest, options?: RequestOptions): Promise<SnapshotResult>;
+  /** Deletes every row of the tables named, in one transaction; the tables, their definitions, and the numbering stay. */
+  clear(request: ClearRequest, options?: RequestOptions): Promise<ClearResult>;
 }
 
 /** The operations of an access, by name: what the control server serves and the client asks for. */
-export const ACCESS_OPERATIONS = ["info", "schema", "browse", "row", "insert", "update", "delete", "sql", "events"] as const;
+export const ACCESS_OPERATIONS = ["info", "schema", "browse", "row", "insert", "update", "delete", "sql", "events", "snapshot", "clear"] as const;
 export type AccessOperation = (typeof ACCESS_OPERATIONS)[number];
 /** The operations that change the database. */
-export const WRITE_OPERATIONS: ReadonlySet<AccessOperation> = new Set(["insert", "update", "delete"]);
+export const WRITE_OPERATIONS: ReadonlySet<AccessOperation> = new Set(["insert", "update", "delete", "clear"]);
 
 export function isAccessOperation(name: unknown): name is AccessOperation {
   return typeof name === "string" && (ACCESS_OPERATIONS as readonly string[]).includes(name);
@@ -341,6 +383,10 @@ export function carryOut(access: RuntimeAccess, operation: AccessOperation, requ
       return access.sql(request as SqlRequest, options);
     case "events":
       return access.events(request as { after?: number } | undefined, options);
+    case "snapshot":
+      return access.snapshot(request as SnapshotRequest, options);
+    case "clear":
+      return access.clear(request as ClearRequest, options);
   }
 }
 

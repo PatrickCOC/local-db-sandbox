@@ -1,5 +1,5 @@
 import { AccessError } from "./access.ts";
-import type { AccessInfo, BrowseRequest, BrowseResult, ChangeResult, EventsResult, RequestOptions, RowKey, RowResult, RuntimeAccess, SchemaInfo, SqlRequest, SqlResult } from "./access.ts";
+import type { AccessInfo, BrowseRequest, BrowseResult, ChangeResult, EventsResult, RequestOptions, RowKey, RowResult, RuntimeAccess, SchemaInfo, SnapshotRequest, SnapshotResult, SqlRequest, SqlResult, ClearRequest, ClearResult } from "./access.ts";
 
 /**
  * An access through which nothing is changed, whatever the access behind it
@@ -55,5 +55,13 @@ export class ReadOnlyAccess implements RuntimeAccess {
 
   events(request?: { after?: number }, options?: RequestOptions): Promise<EventsResult> {
     return this.#access.events(request, options);
+  }
+
+  snapshot(request: SnapshotRequest, options?: RequestOptions): Promise<SnapshotResult> {
+    return this.#access.snapshot(request, options);
+  }
+
+  clear(_request: ClearRequest, _options?: RequestOptions): Promise<ClearResult> {
+    return this.#refuse();
   }
 }

@@ -84,6 +84,8 @@ export interface CollectedSchema {
 export interface CollectOptions {
   /** The time that `now()` in an inserted row stands for. Default: the time of collection. */
   now?: () => Date;
+  /** What the statements were read from, as provenance names it (`SourcePosition.source`). Default: `postgresql-migrations`. */
+  source?: string;
 }
 
 /** A chain of migrations that PostgreSQL would refuse, at the statement that it would refuse. */
@@ -534,11 +536,13 @@ class Collector {
    */
   #sure = true;
   readonly #now: () => Date;
+  readonly #source: string;
   #file!: MigrationFile;
   #statement!: ParsedStatement;
 
   constructor(options: CollectOptions) {
     this.#now = options.now ?? (() => new Date());
+    this.#source = options.source ?? COLLECTOR_SOURCE;
   }
 
   async apply(file: MigrationFile, statements: ParsedStatement[]): Promise<void> {
@@ -553,7 +557,7 @@ class Collector {
   // --- reporting and provenance ----------------------------------------------
 
   #position(): SourcePosition {
-    return { source: COLLECTOR_SOURCE, file: this.#file.file, sha256: this.#file.sha256, statement: this.#statement.index, line: this.#statement.line };
+    return { source: this.#source, file: this.#file.file, sha256: this.#file.sha256, statement: this.#statement.index, line: this.#statement.line };
   }
 
   #origin(name: string, generatedName = false): SchemaOrigin {

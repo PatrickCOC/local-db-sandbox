@@ -57,12 +57,17 @@ describe("installed package", { timeout: 240_000 }, () => {
     assert.deepEqual(await readdir(join(installed, "dist/packages/cli")), ["src"]);
     // The example database, and not the record of whoever had it open when the package was packed.
     assert.deepEqual(await readdir(join(installed, "examples/basic")), ["db.json"]);
-    // The one runtime dependency, PostgreSQL's parser for the migration collector (D-034), and its types package.
+    // The three runtime dependencies: PostgreSQL's parser for the migration collector (D-034), with its types package;
+    // the client that init-pg reads a server's catalog with (D-049), which has none of its own; and the layout of
+    // Studio's ER diagram (D-053), with its graph library.
     assert.deepEqual(await readdir(join(consumer, "node_modules")).then((names) => names.filter((n) => !n.startsWith("."))), [
+      "@dagrejs",
       "@pgsql",
       "libpg-query",
       NAME,
+      "postgres",
     ]);
+    assert.deepEqual(await readdir(join(consumer, "node_modules/@dagrejs")), ["dagre", "graphlib"]);
   });
 
   it("installs a runnable command", async () => {

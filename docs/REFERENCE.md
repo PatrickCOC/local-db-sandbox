@@ -54,12 +54,13 @@ local-db-sandbox inspect <database> [options]
 local-db-sandbox migrate <database> [options]
 local-db-sandbox mail list | show <id> | clear [options]
 local-db-sandbox postgrest <database> [options]
-local-db-sandbox init <project-or-migrations> [options]
+local-db-sandbox init [project-or-migrations] [options]
+local-db-sandbox init-pg <connection-url> [options]
 local-db-sandbox diff-schema <before> <after> [options]
 local-db-sandbox plan-migration <before> <after> [options]
 local-db-sandbox generate-migration <before> <after> --dialect postgres [options]
 local-db-sandbox simulate <database> <script.sql> [options]
-local-db-sandbox studio <database> [options]
+local-db-sandbox studio [database] [options]
 
   -p, --port <number>  Port to listen on (default: $config.server.port or 4783; 0 = any free port)
   -H, --host <name>    Host to bind (default: $config.server.host or 127.0.0.1)
@@ -656,8 +657,13 @@ Not reproduced locally, on purpose:
 Kept as information, not enforced:
   0003_snapshots_and_state.sql:10: Check constraint "job_state_singleton" (id = 1) is kept as information and not enforced locally.
 Report: /project/.local-db-sandbox/sandbox.db.report.json
-Next: local-db-sandbox postgrest .local-db-sandbox/sandbox.db
+Added to .gitignore: /.local-db-sandbox/sandbox.db/ /.local-db-sandbox/sandbox.db.owner.json /.local-db-sandbox/sandbox.db.owner.lock /.local-db-sandbox/sandbox-preview.db/ /.local-db-sandbox/sandbox.db.report.json
+Next steps:
+  local-db-sandbox studio                                   look into the rows, and change them
+  local-db-sandbox postgrest .local-db-sandbox/sandbox.db   serve the database to supabase-js clients
 ```
+
+Without an argument, `init` reads the current directory. In a NestJS project, or a directory without migrations, the error says which command is for it (`init-nest`, `init-pg`).
 
 The migrations are read with PostgreSQL's own parser (`libpg-query`) and applied in the order of their version numbers. The database gets the tables they leave: columns, primary and foreign keys, unique constraints, indexes, enumerated types, defaults (including `now()`, computed when a row is written), and the rows the migrations insert. It is a database directory like any other: serve it with `postgrest`, open it with `sql`.
 
@@ -681,6 +687,92 @@ Error: .local-db-sandbox/sandbox.db is open in the PostgREST endpoint (pid 4242,
 ```
 
 Stop that process, and run the command again. There is no switch that replaces the database anyway. A record that a killed process left beside the database is no obstacle: it is taken over, as every sandbox takes it over.
+
+## From a Running PostgreSQL Database (experimental)
+
+When the database itself is the best statement of the schema (a project with entities and migrations both, or a migration history that is not complete), `init-pg` reads the schema from a running PostgreSQL server and creates a sandbox database from it. No migrations and no ORM are needed, and no row is copied.
+
+```sh
+PGPASSWORD=... npx local-db-sandbox init-pg postgresql://reader@127.0.0.1:5432/app
+npx local-db-sandbox init-pg postgresql://reader@127.0.0.1:5432/app --schema billing --out billing.db
+npx local-db-sandbox studio .local-db-sandbox/sandbox.db
+```
+
+```text
+Read schema "public" of PostgreSQL 18.1 at 127.0.0.1:5432 (database "app", user "reader"): 7 tables, 1 enumerated type
+Created /project/.local-db-sandbox/sandbox.db
+  customers: 8 columns, 1 unique constraint, 0 rows
+  order_lines: 4 columns, 1 unique constraint, 0 rows
+  orders: 5 columns, 2 indexes, 0 rows
+  products: 6 columns, 1 index, 0 rows
+  stock_levels: 4 columns, 0 rows
+  tags: 2 columns, 0 rows
+  warehouses: 3 columns, 1 unique constraint, 0 rows
+  enumerated types: order_state
+No rows were read from PostgreSQL: the tables are empty.
+Kept as information, not enforced:
+  customers.external_id: The default of "customers"."external_id" (gen_random_uuid()) is kept as information: the sandbox does not generate UUIDs, so a row written without one gets none.
+  products.products_stock_check: Check constraint "products_stock_check" (stock >= 0) is kept as information and not enforced locally.
+  orders_open_idx: Index "orders_open_idx" on "orders" where state <> 'shipped'::order_state is kept as information and not created locally.
+  products_title_lower_idx: Unique index "products_title_lower_idx" on "products" over expressions (lower(title)) is kept as information and not created locally; its uniqueness is not enforced.
+Report: /project/.local-db-sandbox/sandbox.db.report.json
+Added to .gitignore: /.local-db-sandbox/sandbox.db/ /.local-db-sandbox/sandbox.db.owner.json /.local-db-sandbox/sandbox.db.owner.lock /.local-db-sandbox/sandbox-preview.db/ /.local-db-sandbox/sandbox.db.report.json
+Next steps:
+  local-db-sandbox studio                                   look into the tables, and add rows
+  local-db-sandbox postgrest .local-db-sandbox/sandbox.db   serve the database to supabase-js clients
+```
+
+`<connection-url>` is `postgresql://<user>@<host>[:<port>]/<database>`, with `?sslmode=disable|prefer|require|verify-ca|verify-full` when needed (default `prefer`: TLS when the server offers it). Give the password in `PGPASSWORD`. One in the URL (`postgresql://reader:secret@...`) is taken too, and the command then says that your shell may keep it in its history. No other parameter of the URL is taken, and no other environment variable chooses the server.
+
+What is read: the tables of the schemas asked for (`public` unless `--schema` says otherwise), their columns with types, nullability, and defaults, `serial` and identity numbering, primary keys, foreign keys, unique constraints, check constraints, indexes, and enumerated types. They go into the database's `schema.json` exactly as `init` puts migrations there: the scan writes the catalog as the statements that would create it, with PostgreSQL's own functions (`format_type`, `pg_get_expr`, `pg_get_constraintdef`, `pg_get_indexdef`), and gives them to the same collector. So types, defaults, keys, and the report mean what they mean for `init`; the statements are in the report (`script`), and its entries refer to their lines.
+
+**Safe by construction.**
+
+- Only the system catalog (`pg_catalog`) is read, with `SELECT`s, in one transaction that is `READ ONLY` (PostgreSQL itself refuses to write in it) and is rolled back. No table of the database is read, so no row leaves it. Nothing is written to PostgreSQL, and no migration or DDL is run there.
+- Connecting may take 10 seconds (`--connect-timeout`), and each catalog query 30 (`--query-timeout`); the server is told the same limit (`statement_timeout`, `lock_timeout`), and the command closes the connection itself when the server does not answer.
+- The connection string and the password are never printed, logged, or written into the database or the report. Messages and the report name the host, port, database, and user.
+- Use a read-only role. It needs to connect to the database and to use the schemas it reads (`USAGE`, which gives no access to rows), and nothing else. The scan reads `pg_catalog`, not `information_schema`, because `information_schema` hides constraints from a role that has no privileges on their tables, which would leave tables without keys:
+
+```sql
+CREATE ROLE sandbox_reader LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE app TO sandbox_reader;
+GRANT USAGE ON SCHEMA public TO sandbox_reader;   -- every role has this on public by default
+```
+
+**One namespace.** A sandbox database has no schemas: tables are named without theirs. With several `--schema`, two schemas that have an object of the same name (a table, an index, an enumerated type) are refused, and every such name is listed; read them one at a time into databases of their own. What refers outside the schemas that are read is said, not followed: a foreign key to a table that is not read is not reproduced, and a type of a schema that is not read is kept as PostgreSQL's own and stored as given.
+
+**Left out, and said so:** PostgreSQL's own schemas (`pg_catalog`, `information_schema`, `pg_*`; asking for one is refused), objects that belong to an extension, views and materialized views, foreign tables, partitions (a partitioned table is created as one ordinary table), row level security, triggers, and indexes that are not valid. Exclusion constraints are unsupported; types the sandbox does not know (`point`, ranges, domains) are kept as information and stored as given. `--strict` refuses to write when anything is unsupported.
+
+| Option | Effect |
+|---|---|
+| `-s`, `--schema <name>` | A schema to read; repeat for more (default `public`). |
+| `-o`, `--out <directory>` | Database to create (default `.local-db-sandbox/sandbox.db` in the current directory). |
+| `--report <file>` | Where the report goes (default `<database>.report.json`). |
+| `--force` | Replace an existing database; its rows are lost. Refused while a process has the database open. A scan that fails replaces nothing. |
+| `--strict` | Fail, writing nothing, when part of the schema is unsupported. |
+| `--connect-timeout <seconds>` | How long connecting may take (default 10). |
+| `--query-timeout <seconds>` | How long each catalog query may take (default 30). |
+| `--max-file-size <MB>` | Largest database to accept. |
+
+Limits: targets PostgreSQL 12 and later, and has been tested on PostgreSQL 18.6 only (see [docs/COMPATIBILITY.md](COMPATIBILITY.md#postgresql-catalog-scan-init-pg)); `sslmode=require` against a server without TLS fails with a message that says so; TCP only (no Unix socket), one host; no rows (there is no option to copy them); a scanned database is not kept in step with its source, so run `init-pg --force` again after the source changed. The rules are in [docs/COMPATIBILITY.md](COMPATIBILITY.md#postgresql-catalog-scan-init-pg).
+
+## The Project's .gitignore
+
+After `init`, `init-pg`, or `init-nest` succeeds, the paths it generated are added to the `.gitignore` at the root of the project's Git repository, so that local databases are not committed by mistake:
+
+```text
+# Local DB Sandbox: local databases and runtime files (added by local-db-sandbox)
+/.local-db-sandbox/sandbox.db/
+/.local-db-sandbox/sandbox.db.owner.json
+/.local-db-sandbox/sandbox.db.owner.lock
+/.local-db-sandbox/sandbox-preview.db/
+/.local-db-sandbox/sandbox.db.report.json
+```
+
+- Only what the command generated: the database (a directory or a single file, wherever `--out` put it), the record of the process that has it open (`.owner.json`, `.owner.lock`), the copy `simulate` writes beside it, and the report of `init` and `init-pg`. Each rule is the path from the repository's root, so no other `.db`, `.json`, or `.sql` file is matched. The sandbox's configuration (`.local-db-sandbox/sandbox.config.json`, `sandbox.server.ts`) is not ignored: you may want to share it.
+- Your file is kept as it was: its comments, rules, and line ends. The rules go at its end, under one comment line, or under that line when an earlier run wrote it. A rule is not added twice, and not at all when Git ignores the path already by a rule of your own (asked of Git with `git check-ignore`, when Git is installed).
+- Nothing is written when the project is not in a Git repository, when the database is outside the project's repository, when the command failed, or with `--no-gitignore`; the command says which. A `.gitignore` that cannot be written is a warning: the database is made.
+- A generated path that Git tracks already is named, with the command that stops tracking it (`git rm -r --cached <path>`); nothing is taken out of Git for you.
 
 ## Schema Diff (experimental)
 
@@ -813,7 +905,7 @@ Limits: a plan has no SQL in it, and nothing is applied to a database. It follow
 
 `generate-migration` writes the differences between two schemas as a migration for PostgreSQL: the steps that `plan-migration` shows, each as the statements PostgreSQL carries it out with. It connects to no database and carries nothing out. The migration is printed, or written to a file you name. Read it before you run it.
 
-Status: the schema diff, the migration plan, and this generator are complete and frozen (M4). They stay experimental. Generation is offline: no command of this package connects to a database or runs a migration, and none will do so as a side effect.
+Status: the schema diff, the migration plan, and this generator are complete and frozen (M4). They stay experimental. Generation is offline: none of these commands connects to a database or runs a migration, and none will do so as a side effect. The one command that connects to a database server is `init-pg`, which reads its catalog in a read-only transaction ([From a Running PostgreSQL Database](#from-a-running-postgresql-database-experimental)).
 
 ```sh
 npx local-db-sandbox generate-migration .local-db-sandbox/sandbox.db . --dialect postgres   # the database, and what the project's migrations make now
@@ -930,6 +1022,7 @@ A page in your browser that looks into a sandbox database: its tables, what each
 
 ```sh
 npx local-db-sandbox studio sandbox.db           # a database directory, or a single file (sandbox.db.json)
+npx local-db-sandbox studio                      # the project's database: the one .local-db-sandbox/sandbox.config.json names, or .local-db-sandbox/sandbox.db
 ```
 
 ```text
@@ -960,6 +1053,9 @@ With `--read-only`, Studio changes nothing whatever the database is.
 - *Rows:* the tables with their row counts; for a table, its columns with their types, whether they take NULL, the primary key, and defaults; the rows by page (25 to 500), sorted by the column whose name you press, filtered by one or more comparisons (`=`, `!=`, `>`, `>=`, `<`, `<=`, contains, is NULL, is not NULL). **Add a row** gives the columns you fill in and leaves the rest to the database; a column that TypeORM fills itself with the time a row is written (`@CreateDateColumn`, `@UpdateDateColumn`), and that has no default in the database, gets the time of the insert when you leave it out, as the application would give it, and keeps a value you give; **Edit** changes the columns you touch of the row with that key; **Delete** removes it, after asking.
 - *SQL:* `SELECT`, `INSERT`, `UPDATE`, and `DELETE`, several statements separated by semicolons. Without **Allow changes**, a statement that would change anything is refused by SQLite itself, whatever it looks like. With it, the page asks first, and the statements run as one transaction: committed when every one went well, taken back when one did not. Results show the rows a statement returned and how many it changed.
 - *API:* one HTTP request at a time to an API that runs on this machine: a method (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`), a URL, headers (one `Name: value` per line), and a JSON body. **Send** shows the status, how long it took, the response headers, and the body (laid out when it is JSON), or why it was not sent or not answered. Studio's server sends it, to `127.0.0.1`, `localhost`, or `[::1]` only. Whether the answer is right is for you to say: then look at the rows in *Rows* or *SQL*.
+- *Export:* the tables you choose (one, several, or **All**), written as an SQL script for PostgreSQL that the page offers as a `.sql` file: **Schema only** (the default), **Data only**, or **Schema + data**. The page says how many tables and which mode before you export. An export with data asks you to confirm that the file will hold the rows, which may be data you entered. See [SQL export](#sql-export-studios-export-tab) below.
+- *Clear data:* deletes every row of the tables you choose (one, several, or **All**), in one transaction; the tables, columns, keys, constraints, and indexes stay. It asks you to tick that the rows cannot be restored, and then to confirm in a dialog that names the tables and their rows. See [Clearing rows](#clearing-rows-studios-clear-data-tab) below.
+- *ER Diagram:* every table with its columns, types, primary and foreign keys, and NULL, and every foreign key as lines from column to column; zoom, pan, Fit to view, search, and tables you can drag. Read-only, and made without reading a row. See [ER diagram](#er-diagram-studios-er-diagram-tab) below.
 - *Refresh* reads everything again. The page also does so after every change it made, and when the sandbox it is attached to was restarted.
 
 **Calling the application's API.** Studio does not start your application; start it as you do.
@@ -980,7 +1076,7 @@ Values are shown as the application has them (`true`, an ISO date-time, JSON), a
 - Studio is never the second one. A database that a sandbox has open, it looks into through that sandbox. A directory that a process has open which has no runtime to look into (the REST sandbox, which runs on the JSON engine; the SQL console) is refused; `studio --read-only` then shows what is stored.
 - A Studio that has a directory to itself keeps a sandbox out in the same way, and says so when it starts and on its page. **To use the database with an application: stop Studio (Ctrl+C), start the sandbox, and start Studio again.** It then attaches to the sandbox, and both show the same rows. A sandbox that is started while Studio still has the database is refused, and is told the same three steps. Nothing lets go of a database by itself, and nothing starts a sandbox for you.
 - The file is removed when its process stops. A process that was killed leaves it behind; whoever comes next sees that the process is gone and takes the database. If a refusal names a process that is not there any more, delete the file it names.
-- The file is not part of the database, and holds the token of a local endpoint. Do not commit it: add `*.owner.json` to `.gitignore` when your database is in the repository.
+- The file is not part of the database, and holds the token of a local endpoint. Do not commit it: the init commands add it to the project's `.gitignore` ([The Project's .gitignore](#the-projects-gitignore)); add `*.owner.json` yourself for a database made another way.
 
 **With `npm run sandbox` (watch mode).** Start Studio while the sandbox runs, and leave it open. When a source change restarts the sandbox, the page says that it is not connected, then finds the new sandbox process by itself, says that the sandbox was restarted, and reads everything again. Studio stays attached while the sandbox is away: it does not take the database for itself.
 
@@ -1008,7 +1104,53 @@ Limits:
 - A directory in an earlier format is opened read-only, with the command that migrates it.
 - Times shown are local execution times, and say nothing about how a production database would perform.
 
-Not part of Studio: editing schemas or migrations, ERD, charts, a query builder, import and export, access from another machine, accounts, and connections to a real database server; and in the API tab, requests to another machine, collections, saved requests or history, environments, assertions, reports, and starting or watching the application. The rules are in [docs/COMPATIBILITY.md](COMPATIBILITY.md#local-db-studio-and-who-has-a-database-open).
+Not part of Studio: editing schemas or migrations, the ER diagram as an image file, charts, a query builder, import, access from another machine, accounts, and connections to a real database server; and in the API tab, requests to another machine, collections, saved requests or history, environments, assertions, reports, and starting or watching the application. The rules are in [docs/COMPATIBILITY.md](COMPATIBILITY.md#local-db-studio-and-who-has-a-database-open).
+
+### Clearing rows (Studio's Clear data tab)
+
+The Clear data tab deletes every row of the tables you choose, and nothing else:
+
+- **One transaction.** All the tables chosen are cleared, or none: when a delete fails, or what changed cannot be saved, everything is taken back. The database directory, the schema, and every other table stay as they were.
+- **Foreign keys.** Among the tables chosen, foreign keys are checked when the transaction ends, so tables that refer to one another, or to themselves, are cleared together. A table that is **not** chosen and has rows that refer to a chosen one stops the clear: it would lose those rows (`ON DELETE CASCADE`), have them changed (`SET NULL`), or keep rows that refer to nothing. The refusal names those tables and how many rows refer; choose them too, or clear them first. Nothing outside your choice is ever changed, and foreign keys are never switched off.
+- **Numbering is not reset.** While the database stays open, a numbered key goes on after the last number it gave. The stored database keeps rows, not counters: after it is opened again (a new Studio, a restarted sandbox), an emptied table starts numbering at 1 again, as after deleting its rows any other way.
+- **It cannot be undone.** To keep the rows, export them first (Export, Data only or Schema + data), or copy the database directory while nothing has it open.
+- **Where it runs.** Standalone, in Studio's runtime; attached, in the runtime of the process that has the database open (the NestJS sandbox, the PostgREST endpoint), never by writing the files. A read-only Studio, a single-file database, and a runtime with a transaction of the application open refuse it.
+
+### SQL export (Studio's Export tab)
+
+The Export tab writes tables of the sandbox as a script that rebuilds them in PostgreSQL, to load into an empty database:
+
+```sh
+psql -v ON_ERROR_STOP=1 -d my_empty_db -f local-db-export-schema-and-data-20261026T081503Z.sql
+```
+
+| Mode | The script holds | Load it into |
+|---|---|---|
+| Schema only | enumerated types, `CREATE TABLE` with primary keys, unique constraints, check constraints, and defaults, indexes, and the foreign keys | a database without these tables |
+| Data only | `INSERT`s of every row, and the numbering of numbered columns set past the largest value | a database that has these tables, empty |
+| Schema + data | the definitions, the rows, then the foreign keys | a database without these tables |
+
+What to know:
+
+- It is one transaction (`BEGIN` ... `COMMIT`): when a statement fails, nothing of it stays. The last line counts the statements, so a cut file is told from a whole one.
+- The definitions are what `generate-migration` writes for these tables from an empty schema, and are refused for what it refuses: a column whose type the schema does not say (a database written by hand), a name longer than PostgreSQL keeps. Values are written from each column's type, exactly: NULL, booleans, whole numbers beyond JavaScript's (as their digits), decimals, dates and times, UUIDs, JSON and JSONB, arrays, bytes, values of enumerated types; every name is quoted, and every text is a constant, whatever it holds.
+- Tables that refer to one another, or to themselves, load in any order with schema and data: the foreign keys come after the rows. With data only, the rows are put in the order of the foreign keys, and tables in a circle need the target's foreign keys `DEFERRABLE` (the script says so).
+- A foreign key to a table you did not choose is left out, and said. A value that is not a value of its column's type, or anything else that cannot be written as it is, refuses the export as a whole, with every reason: no file is made.
+- It reads the sandbox and changes nothing; Studio may be read-only. Attached to a sandbox, it reads that sandbox's runtime. It connects to no database. The file's name holds nothing of the database or where it is, and the script holds no connection string, password, token, or path; it holds the rows, which may be personal: keep the file accordingly.
+- Limits: the chosen tables with their rows may be 32 MiB as JSON, and a script 64 MiB. Above that the export is refused; export fewer tables, or the schema alone.
+- Tested on PostgreSQL 18.6; other versions of PostgreSQL are targeted and not tested. The rules are in [docs/COMPATIBILITY.md](COMPATIBILITY.md#sql-export-studios-export-tab).
+
+### ER diagram (Studio's ER Diagram tab)
+
+The ER Diagram tab draws the tables of the database and their foreign keys:
+
+- Each table is a box: its name, and for each column `PK` and `FK` marks, its name, its type (as the Rows tab shows it), and `null` or `not null`. A foreign key is a line from each column that refers to the column it refers to, with an arrow there; a key over several columns has a line for each pair of columns. A table that refers to itself loops out of its side and back. Tables without foreign keys are there too. The numbers of tables and foreign keys are shown above the diagram.
+- **Zoom in** / **Zoom out**, or the mouse wheel (about the pointer); drag the background to pan; **Fit to view** shows every table, as the first view does. **Find a table** lists the tables whose names hold what you type; a click on one (or Enter, for the first) shows it in the middle and marks it with its foreign keys. A click on a table marks its foreign keys. Drag a table to move it; **Auto arrange** puts every table back where the layout puts it. Where a table was moved to is not kept.
+- The layout is computed by Studio's server with Dagre (MIT): tables referred to stand left of those that refer to them, connected tables together, and the rest in rows by name. The same schema gets the same layout.
+- It reads the tables' definitions and no row, and changes nothing; it works in a read-only Studio, on a single file, and attached to a sandbox. It sends nothing anywhere but to Studio's server.
+- Only declared foreign keys are drawn; one to a table the database does not have is named above the diagram instead. A name longer than 40 character cells is cut in its box, and whole in its tooltip.
+- Limits: at most 400 tables and 8,000 columns; above that the tab says so, and the Rows and Export tabs show the tables one by one. It cannot be saved as an image.
+- The rules are in [docs/COMPATIBILITY.md](COMPATIBILITY.md#er-diagram-studios-er-diagram-tab); the library's license in [docs/THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Architecture
 
@@ -1041,11 +1183,11 @@ packages/
   nest-typeorm/  TypeORM on the runtime, NestJS module, and parallel sandbox server (experimental)
   side-effects/  mail capture (local SMTP server) and network guard for an application in the sandbox (experimental)
   postgrest/     PostgREST-compatible endpoint (subset) for supabase-js clients, on the runtime (experimental)
-  import-postgres/ PostgreSQL migration collector: migrations to the runtime's table definitions (experimental)
+  import-postgres/ PostgreSQL migration collector: migrations, or a running database's catalog (init-pg), to the runtime's table definitions (experimental)
   schema-diff/   what differs between two schemas, as data and as lines (experimental)
-  migration/     a schema diff applied to a schema, the plan of steps that carries it out, and (src/postgres) that plan as a PostgreSQL migration (experimental)
-  runtime-access/ what is asked of a runtime that a process has open (rows by page, one row, changes, a console), and the local endpoint that serves it to other processes (experimental)
-  studio/        Local DB Studio: a session on a database through that access, and its page (experimental)
+  migration/     a schema diff applied to a schema, the plan of steps that carries it out, and (src/postgres) that plan as a PostgreSQL migration, and tables as a PostgreSQL script for Studio's Export tab (experimental)
+  runtime-access/ what is asked of a runtime that a process has open (rows by page, one row, changes, a console, a snapshot of whole tables), and the local endpoint that serves it to other processes (experimental)
+  studio/        Local DB Studio: a session on a database through that access, its page, and the ER diagram's layout (experimental)
 examples/basic/  example database file
 docs/            user guide, reference, architecture, compatibility, storage format
 ```
@@ -1056,4 +1198,4 @@ The standalone REST mode runs on the core's JSON engine. The NestJS + TypeORM mo
 
 ## Out of Scope
 
-Intentionally not part of this tool: a SQL parser or SQL translation of its own (the NestJS mode executes SQL on embedded SQLite as it is; `init` reads migrations with PostgreSQL's own parser and translates nothing), PostgreSQL/MySQL compatibility, generating migrations for a database other than PostgreSQL or as the migration classes of an ORM, migrations backwards, converting or filling in rows for a migration, running a migration on a database and applying a schema diff to a database (`simulate` runs SQL on a copy only; `diff-schema` says what differs, `plan-migration` in which steps it would be carried out, and `generate-migration` writes those steps as SQL for PostgreSQL; none of them changes anything or connects to a database), schema migrations for your application's database (`migrate` only changes the sandbox's own storage format), dump import, entity or ERD generation, performance dashboards, authentication, production-grade concurrency, a VS Code extension, Supabase beyond PostgREST table access (Auth, Storage, Realtime, RPC, Edge Functions, Row Level Security), and stand-ins for other services (Redis, S3, HTTP APIs, message queues, webhooks): the sandbox captures mail and can refuse connections, and emulates nothing else. Local DB Studio looks into the sandbox's own databases on this machine: it is not a client for a database server, is not reachable from another machine, has no accounts, and does not edit schemas or migrations.
+Intentionally not part of this tool: a SQL parser or SQL translation of its own (the NestJS mode executes SQL on embedded SQLite as it is; `init` reads migrations with PostgreSQL's own parser and translates nothing), PostgreSQL/MySQL compatibility, generating migrations for a database other than PostgreSQL or as the migration classes of an ORM, migrations backwards, converting or filling in rows for a migration, running a migration on a database and applying a schema diff to a database (`simulate` runs SQL on a copy only; `diff-schema` says what differs, `plan-migration` in which steps it would be carried out, and `generate-migration` writes those steps as SQL for PostgreSQL; none of them changes anything or connects to a database), schema migrations for your application's database (`migrate` only changes the sandbox's own storage format), dump import, entity generation, ERD files (Studio's ER Diagram tab shows the tables, read-only), performance dashboards, authentication, production-grade concurrency, a VS Code extension, Supabase beyond PostgREST table access (Auth, Storage, Realtime, RPC, Edge Functions, Row Level Security), and stand-ins for other services (Redis, S3, HTTP APIs, message queues, webhooks): the sandbox captures mail and can refuse connections, and emulates nothing else. Local DB Studio looks into the sandbox's own databases on this machine: it is not a client for a database server, is not reachable from another machine, has no accounts, and does not edit schemas or migrations.
